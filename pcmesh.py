@@ -1,5 +1,6 @@
 import io
 import os
+import struct
 from ctypes import *
 from enum import IntEnum
 
@@ -716,6 +717,16 @@ def write_indices(resource_file, indices, primitive_type, enable_normals: bool):
         assert(0)
 
 
+class UserMeshData:
+    """Class to store user mesh data."""
+    def __init__(self, vertices, indices, uvs):
+        self.vertices = vertices
+        self.indices = indices
+        self.uvs = uvs
+
+    def __repr__(self):
+        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, uvs={len(self.uvs)})"    
+
 class MeshData:
     """Class to store parsed mesh data."""
     def __init__(self, name):
@@ -738,12 +749,139 @@ class MeshData:
 
 current_path = ""
 
-def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write:bool = True):
+def align_address(size, alignment):
+    return (size + (alignment - 1)) & ~(alignment - 1)
+
+def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
+    print("Updating mesh data...")
+
+    offset = mesh.Sections
+    sections_t = Section * int(mesh.NSections)
+    sections = sections_t.from_buffer_copy(buffer_bytes[offset : offset + sizeof(sections_t)])
+
+    for idx, section in enumerate(sections):
+        offset = section.Section
+        meshSection = nglMeshSection.from_buffer_copy(buffer_bytes[offset : offset + sizeof(nglMeshSection)])
+
+        # update values
+        struct.pack_into("I", buffer_bytes, offset + nglMeshSection.NVertices.offset, len(user_mesh.vertices))
+        struct.pack_into("I", buffer_bytes, offset + nglMeshSection.NIndices.offset, len(user_mesh.indices))
+
+        # delete existing verts & indices
+        vertex_offset = meshSection.VertexBuffer.m_vertexData
+        del buffer_bytes[vertex_offset:]
+
+        index_offset = meshSection.m_indices
+        index_end = index_offset + (meshSection.NIndices * 2)
+        del buffer_bytes[index_offset:index_end]
+
+        if meshSection.m_stride == 64:
+            class VertexData(Structure):
+                _fields_ = [
+                    ("pos", c_float * 3),
+                    ("normal", c_float * 3),
+                    ("uv", c_float * 2),
+                    ("bone_indices", c_float * 4),
+                    ("bone_weights", c_float * 4)
+                ]
+            assert(sizeof(VertexData) == 0x40)
+        elif meshSection.m_stride in [32, 12, 24, 60]:
+            class VertexData(Structure):
+                _fields_ = [
+                    ("pos", c_float * 3),
+                    ("uv", c_float * 2),
+                    ("ff", c_float * 1)
+                ]
+            assert(sizeof(VertexData) == 0x18)
+        else:
+            raise ValueError(f"Unsupported stride value: {meshSection.m_stride}")
+
+        flattened_indices = []
+        for idx_set in user_mesh.indices:
+            if isinstance(idx_set, tuple):
+                flattened_indices.extend(idx_set)
+            else:
+                flattened_indices.append(idx_set)
+
+        new_vertex_size = len(user_mesh.vertices) * meshSection.m_stride
+        required_size = vertex_offset + new_vertex_size
+        if len(buffer_bytes) < required_size:
+            buffer_bytes.extend(b"\x00" * (required_size - len(buffer_bytes)))
+
+        # write new indices & vertices
+        for i, idx in enumerate(flattened_indices):
+            struct.pack_into("H", buffer_bytes, index_offset + i * 2, int(idx))
+
+        for i, vtx in enumerate(user_mesh.vertices):
+            vertex_data = VertexData()
+            vertex_data.pos = (vtx[0], vtx[1], vtx[2])
+
+            if hasattr(vertex_data, "uv") and i < len(user_mesh.uvs):
+                vertex_data.uv = (user_mesh.uvs[i][0], 1.0 - user_mesh.uvs[i][1])
+
+            if hasattr(vertex_data, "normal"):
+                vertex_data.normal = (0.0, 0.0, 1.0)
+
+            packed_data = bytearray(vertex_data)
+            buffer_bytes[vertex_offset:vertex_offset + sizeof(VertexData)] = packed_data
+            vertex_offset += sizeof(VertexData)
+
+        # update vertex buffer
+        expected_vertex_buffer_size = meshSection.m_stride * len(user_mesh.vertices)
+        vertex_buffer_offset = offset + nglMeshSection.VertexBuffer.offset 
+        size_offset = vertex_buffer_offset + nglVertexBuffer.Size.offset 
+        struct.pack_into("I", buffer_bytes, size_offset, expected_vertex_buffer_size)
+        
+    # align data
+    buffer_size = len(buffer_bytes)
+    padding_size = (align_address(buffer_size, 0x1000)) - buffer_size
+
+    if padding_size > 0:
+        buffer_bytes.extend(b"\x00" * padding_size)
+        
+    print("Finished!")
+
+
+def write_meshfile(filepath, user_mesh):
+    with io.open(filepath, "rb") as f:
+        buffer_bytes = bytearray(f.read())
+
+    Header = nglMeshFileHeader.from_buffer_copy(buffer_bytes[:sizeof(nglMeshFileHeader)])
+    assert(Header.Tag == b'PCM ')
+    assert(Header.Version == 0x601)
+
+    materials = []
+    modified = False
+
+    for i in range(Header.NDirectoryEntries):
+        offset = Header.DirectoryEntries + i * sizeof(nglDirectoryEntry)
+        entry = nglDirectoryEntry.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglDirectoryEntry))])
+
+        type_dir_entry = int.from_bytes(entry.typeDirectoryEntry, byteorder='big')
+
+        if type_dir_entry == int(TypeDirectoryEntry.MESH) and not modified:
+            print(f"Replacing mesh at offset: 0x{entry.field_4:X}")
+
+            offset = entry.field_4
+            mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
+            replace_mesh_data(buffer_bytes, offset, mesh, user_mesh)
+            modified = True
+
+    if not modified:
+        print("No mesh found to replace.")
+        return
+
+    with io.open(filepath, "wb") as f:
+        f.write(buffer_bytes)
+
+    print(f"Successfully updated {filepath}")
+
+def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
 
     offset = Mesh.Name
     nameMesh = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
     ndisplay = nameMesh.field_4.decode("utf-8")
-    if write:
+    if write_obj:
         folder = 'tmp'
         try:
                 os.mkdir(folder)
@@ -770,7 +908,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write:bool = True):
         offset = meshSection.Name
         name = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
         
-        if write:
+        if write_obj:
                 resource_file.write("o " + ndisplay + '_' + str(idx) + '\n')
 
         #resource_file.write("\nidx_section = %d, name = %s, primitiveType = %d, stride = %d, NIndices = %d, NVertices = %d, SizeVertexDataInBytes = %d\n"
@@ -822,7 +960,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write:bool = True):
         vertex_data_t = VertexData * int(meshSection.NVertices)
         vertex_data = vertex_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(vertex_data_t))])
 
-        if write:
+        if write_obj:
                 for vtx in vertex_data:
                         resource_file.write("v " + ("%.6f %.6f %.6f" % (vtx.pos[0], vtx.pos[1], vtx.pos[2])) + '\n')
                         if meshSection.m_stride > 12:
@@ -852,10 +990,10 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write:bool = True):
             for i, index in enumerate(indices):
                 indices[i] = prev_NVertices + index + 1
                 
-            if write:
+            if write_obj:
                 write_indices(resource_file, indices, meshSection.m_primitiveType, False)
         elif meshSection.NVertices == 6:
-            if write:
+            if write_obj:
                 resource_file.write("f " + ("%d %d %d\n" % (1, 2, 3)))
                 resource_file.write("f " + ("%d %d %d\n" % (4, 5, 6)))
         else:
@@ -867,7 +1005,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write:bool = True):
         prev_NVertices = meshSection.NVertices + prev_NVertices
 
         #resource_file.write(str(list(indices)) + '\n')
-        if write:
+        if write_obj:
                 resource_file.write("\n\n")
         if meshSection.m_stride == 64:
                 for vtx in vertex_data:
@@ -974,7 +1112,6 @@ def read_meshfile(file):
 
                 offset = entry.field_4
                 mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
-
                 mesh_data.append(read_mesh(mesh, buffer_bytes, materials, False))
     return mesh_data
 

@@ -188,7 +188,24 @@ class PCMESHExporter(bpy.types.Operator):
     def execute(self, context):
         current_path = self.filepath
         print(current_path)
-        # @todo
+        
+        obj = context.object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object selected!")
+            return {'CANCELLED'}
+        
+        mesh = obj.data
+        bpy.ops.object.mode_set(mode='OBJECT')
+        mesh.calc_loop_triangles()
+        
+        vertices = [tuple(v.co) for v in mesh.vertices]
+        indices = [tuple(tri.vertices) for tri in mesh.loop_triangles]
+        uv_layer = mesh.uv_layers.active
+        if not uv_layer:
+            self.report({'ERROR'}, "Mesh has no UV map!")
+            return {'CANCELLED'}
+        uvs = [tuple(uv_layer.data[loop.index].uv) for loop in mesh.loops]
+        write_meshfile(self.filepath, UserMeshData(vertices, indices, uvs))
         return {'FINISHED'}
 
     def invoke(self, context, event):
