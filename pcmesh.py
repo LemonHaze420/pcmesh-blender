@@ -1,6 +1,7 @@
 import io
 import os
 import struct
+import ctypes
 from ctypes import *
 from enum import IntEnum
 
@@ -774,6 +775,22 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         index_offset = meshSection.m_indices
         index_end = index_offset + (meshSection.NIndices * 2)
         del buffer_bytes[index_offset:index_end]
+        flattened_indices = []
+        for idx_set in user_mesh.indices:
+            if isinstance(idx_set, tuple):
+                flattened_indices.extend(idx_set)
+            else:
+                flattened_indices.append(idx_set)
+
+        # insert new indices bytes into buffer_bytes
+        new_bytes = b''.join(struct.pack("H", int(idx)) for idx in flattened_indices)
+        buffer_bytes[index_offset:index_offset] = new_bytes
+        new_end = index_offset + len(new_bytes)
+        diff = index_end - new_end
+
+        # extend
+        if diff != 0:
+            buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
 
         if meshSection.m_stride == 64:
             class VertexData(Structure):
@@ -796,26 +813,18 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         else:
             raise ValueError(f"Unsupported stride value: {meshSection.m_stride}")
 
-        flattened_indices = []
-        for idx_set in user_mesh.indices:
-            if isinstance(idx_set, tuple):
-                flattened_indices.extend(idx_set)
-            else:
-                flattened_indices.append(idx_set)
-
         new_vertex_size = len(user_mesh.vertices) * meshSection.m_stride
         required_size = vertex_offset + new_vertex_size
         if len(buffer_bytes) < required_size:
             buffer_bytes.extend(b"\x00" * (required_size - len(buffer_bytes)))
-
-        # write new indices & vertices
-        for i, idx in enumerate(flattened_indices):
-            struct.pack_into("H", buffer_bytes, index_offset + i * 2, int(idx))
-
+        # write new vertex data
         for i, vtx in enumerate(user_mesh.vertices):
             vertex_data = VertexData()
             vertex_data.pos = (vtx[0], vtx[1], vtx[2])
 
+            if hasattr(vertex_data, "ff"):
+                bits = (ctypes.c_uint32 * 1)(0xFFFFFFFF)
+                ctypes.memmove(ctypes.addressof(vertex_data.ff), bits, sizeof(bits))
             if hasattr(vertex_data, "uv") and i < len(user_mesh.uvs):
                 vertex_data.uv = (user_mesh.uvs[i][0], 1.0 - user_mesh.uvs[i][1])
 
