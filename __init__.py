@@ -187,7 +187,6 @@ class PCMESHExporter(bpy.types.Operator):
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     def execute(self, context):
         current_path = self.filepath
-        print(current_path)
         
         obj = context.object
         if not obj or obj.type != 'MESH':
@@ -200,12 +199,10 @@ class PCMESHExporter(bpy.types.Operator):
         
         vertices = [tuple(v.co) for v in mesh.vertices]
         indices = [tuple(tri.vertices) for tri in mesh.loop_triangles]
+        normals =  [tuple(tri.normal) for tri in mesh.loop_triangles]
         uv_layer = mesh.uv_layers.active
-        if not uv_layer:
-            self.report({'ERROR'}, "Mesh has no UV map!")
-            return {'CANCELLED'}
         uvs = [tuple(uv_layer.data[loop.index].uv) for loop in mesh.loops]
-        write_meshfile(self.filepath, UserMeshData(vertices, indices, uvs))
+        write_meshfile(self.filepath, UserMeshData(vertices, indices, normals, uvs))
         return {'FINISHED'}
 
     def invoke(self, context, event):

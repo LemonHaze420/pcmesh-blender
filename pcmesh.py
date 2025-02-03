@@ -720,13 +720,14 @@ def write_indices(resource_file, indices, primitive_type, enable_normals: bool):
 
 class UserMeshData:
     """Class to store user mesh data."""
-    def __init__(self, vertices, indices, uvs):
+    def __init__(self, vertices, indices, normals, uvs):
         self.vertices = vertices
         self.indices = indices
+        self.normals = normals
         self.uvs = uvs
 
     def __repr__(self):
-        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, uvs={len(self.uvs)})"    
+        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, normals={len(self.normals)}, uvs={len(self.uvs)})"    
 
 class MeshData:
     """Class to store parsed mesh data."""
@@ -789,8 +790,11 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         diff = index_end - new_end
 
         # extend
-        if diff != 0:
-            buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
+        if 0 and diff != 0:
+                buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
+                struct.pack_into("I", buffer_bytes, offset, meshSection.Name - diff)
+                if meshSection.Material:
+                        struct.pack_into("I", buffer_bytes, offset + nglMeshSection.Material.offset, meshSection.Material - diff)
 
         if meshSection.m_stride == 64:
             class VertexData(Structure):
@@ -817,6 +821,7 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         required_size = vertex_offset + new_vertex_size
         if len(buffer_bytes) < required_size:
             buffer_bytes.extend(b"\x00" * (required_size - len(buffer_bytes)))
+            
         # write new vertex data
         for i, vtx in enumerate(user_mesh.vertices):
             vertex_data = VertexData()
@@ -827,9 +832,8 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
                 ctypes.memmove(ctypes.addressof(vertex_data.ff), bits, sizeof(bits))
             if hasattr(vertex_data, "uv") and i < len(user_mesh.uvs):
                 vertex_data.uv = (user_mesh.uvs[i][0], 1.0 - user_mesh.uvs[i][1])
-
             if hasattr(vertex_data, "normal"):
-                vertex_data.normal = (0.0, 0.0, 1.0)
+                vertex_data.normal = (user_mesh[0], user_mesh[1], user_mesh[2])
 
             packed_data = bytearray(vertex_data)
             buffer_bytes[vertex_offset:vertex_offset + sizeof(VertexData)] = packed_data
@@ -849,6 +853,7 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         buffer_bytes.extend(b"\x00" * padding_size)
         
     print("Finished!")
+    return diff
 
 
 def write_meshfile(filepath, user_mesh):
@@ -861,7 +866,8 @@ def write_meshfile(filepath, user_mesh):
 
     materials = []
     modified = False
-
+    diff = 0
+        
     for i in range(Header.NDirectoryEntries):
         offset = Header.DirectoryEntries + i * sizeof(nglDirectoryEntry)
         entry = nglDirectoryEntry.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglDirectoryEntry))])
@@ -873,12 +879,28 @@ def write_meshfile(filepath, user_mesh):
 
             offset = entry.field_4
             mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
-            replace_mesh_data(buffer_bytes, offset, mesh, user_mesh)
+            diff = replace_mesh_data(buffer_bytes, offset, mesh, user_mesh)
             modified = True
 
     if not modified:
         print("No mesh found to replace.")
         return
+    else:
+        if 0 and diff != 0:
+            #
+            print(f"diff = 0x{diff:X}")
+            for i in range(Header.NDirectoryEntries):
+                offset = Header.DirectoryEntries + i * sizeof(nglDirectoryEntry)
+                entry = nglDirectoryEntry.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglDirectoryEntry))])
+                type_dir_entry = int.from_bytes(entry.typeDirectoryEntry, byteorder='big')
+                
+                name_offs = int.from_bytes(buffer_bytes[entry.field_8:entry.field_8+4], byteorder='little')
+                if name_offs != 0:
+                        struct.pack_into("I", buffer_bytes, entry.field_8, name_offs - diff)
+                if entry.field_8 != 0:
+                        struct.pack_into("I", buffer_bytes, offset + nglDirectoryEntry.field_8.offset, entry.field_8 - diff)
+
+
 
     with io.open(filepath, "wb") as f:
         f.write(buffer_bytes)
