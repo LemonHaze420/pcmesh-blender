@@ -720,14 +720,16 @@ def write_indices(resource_file, indices, primitive_type, enable_normals: bool):
 
 class UserMeshData:
     """Class to store user mesh data."""
-    def __init__(self, vertices, indices, normals, uvs):
+    def __init__(self, vertices, indices, normals, uvs, bone_indices, bone_weights):
         self.vertices = vertices
         self.indices = indices
         self.normals = normals
         self.uvs = uvs
+        self.bone_indices = bone_indices
+        self.bone_weights = bone_weights
 
     def __repr__(self):
-        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, normals={len(self.normals)}, uvs={len(self.uvs)})"    
+        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, normals={len(self.normals)}, uvs={len(self.uvs)}, bone_indices={len(self.bone_indices)}, bone_weights={len(self.bone_weights)})"    
 
 class MeshData:
     """Class to store parsed mesh data."""
@@ -750,6 +752,8 @@ class MeshData:
 
 
 current_path = ""
+
+DEV_MODE=0
 
 def align_address(size, alignment):
     return (size + (alignment - 1)) & ~(alignment - 1)
@@ -790,7 +794,7 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         diff = index_end - new_end
 
         # extend
-        if 0 and diff != 0:
+        if DEV_MODE and diff != 0:
                 buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
                 struct.pack_into("I", buffer_bytes, offset, meshSection.Name - diff)
                 if meshSection.Material:
@@ -834,6 +838,10 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
                 vertex_data.uv = (user_mesh.uvs[i][0], 1.0 - user_mesh.uvs[i][1])
             if hasattr(vertex_data, "normal"):
                 vertex_data.normal = (user_mesh[0], user_mesh[1], user_mesh[2])
+            if hasattr(vertex_data, "bone_indices"):
+                vertex_data.bone_indices = (user_mesh.bone_indices[0], user_mesh.bone_indices[1], user_mesh.bone_indices[2], user_mesh.bone_indices[3])
+            if hasattr(vertex_data, "bone_weights"):
+                vertex_data.bone_weights = (user_mesh.bone_weights[0], user_mesh.bone_weights[1], user_mesh.bone_weights[2], user_mesh.bone_weights[3])
 
             packed_data = bytearray(vertex_data)
             buffer_bytes[vertex_offset:vertex_offset + sizeof(VertexData)] = packed_data
@@ -886,7 +894,7 @@ def write_meshfile(filepath, user_mesh):
         print("No mesh found to replace.")
         return
     else:
-        if 0 and diff != 0:
+        if DEV_MODE and diff != 0:
             #
             print(f"diff = 0x{diff:X}")
             for i in range(Header.NDirectoryEntries):
@@ -902,7 +910,7 @@ def write_meshfile(filepath, user_mesh):
 
 
 
-    with io.open(filepath, "wb") as f:
+    with io.open(filepath + ".mod", "wb") as f:
         f.write(buffer_bytes)
 
     print(f"Successfully updated {filepath}")

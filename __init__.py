@@ -202,7 +202,27 @@ class PCMESHExporter(bpy.types.Operator):
         normals =  [tuple(tri.normal) for tri in mesh.loop_triangles]
         uv_layer = mesh.uv_layers.active
         uvs = [tuple(uv_layer.data[loop.index].uv) for loop in mesh.loops]
-        write_meshfile(self.filepath, UserMeshData(vertices, indices, normals, uvs))
+        vertex_groups = obj.vertex_groups
+        bone_indices = []
+        bone_weights = []
+        for v in mesh.vertices:
+                indices = []
+                weights = []
+                for group in v.groups:
+                        group_index = group.group
+                        weight = group.weight
+                        if group_index < len(vertex_groups):
+                                indices.append(group_index)
+                                weights.append(weight)
+                while len(indices) < 4:
+                        indices.append(0)
+                        weights.append(0.0)
+                if len(indices) > 4:
+                        indices = indices[:4]
+                        weights = weights[:4]
+                bone_indices.append(tuple(indices))
+                bone_weights.append(tuple(weights))
+        write_meshfile(self.filepath, UserMeshData(vertices, indices, normals, uvs, bone_indices, bone_weights))
         return {'FINISHED'}
 
     def invoke(self, context, event):
