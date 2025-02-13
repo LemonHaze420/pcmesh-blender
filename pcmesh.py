@@ -830,18 +830,16 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         for i, vtx in enumerate(user_mesh.vertices):
             vertex_data = VertexData()
             vertex_data.pos = (vtx[0], vtx[1], vtx[2])
-
+            vertex_data.uv = (user_mesh.uvs[i][0], 1.0 - user_mesh.uvs[i][1])
             if hasattr(vertex_data, "ff"):
                 bits = (ctypes.c_uint32 * 1)(0xFFFFFFFF)
                 ctypes.memmove(ctypes.addressof(vertex_data.ff), bits, sizeof(bits))
-            if hasattr(vertex_data, "uv") and i < len(user_mesh.uvs):
-                vertex_data.uv = (user_mesh.uvs[i][0], 1.0 - user_mesh.uvs[i][1])
             if hasattr(vertex_data, "normal"):
-                vertex_data.normal = (user_mesh[0], user_mesh[1], user_mesh[2])
+                vertex_data.normal = (user_mesh.normals[i][0], user_mesh.normals[i][1], user_mesh.normals[i][2])
             if hasattr(vertex_data, "bone_indices"):
-                vertex_data.bone_indices = (user_mesh.bone_indices[0], user_mesh.bone_indices[1], user_mesh.bone_indices[2], user_mesh.bone_indices[3])
+                vertex_data.bone_indices = (user_mesh.bone_indices[i][0], user_mesh.bone_indices[i][1], user_mesh.bone_indices[i][2], user_mesh.bone_indices[i][3])
             if hasattr(vertex_data, "bone_weights"):
-                vertex_data.bone_weights = (user_mesh.bone_weights[0], user_mesh.bone_weights[1], user_mesh.bone_weights[2], user_mesh.bone_weights[3])
+                vertex_data.bone_weights = (user_mesh.bone_weights[i][0], user_mesh.bone_weights[i][1], user_mesh.bone_weights[i][2], user_mesh.bone_weights[i][3])
 
             packed_data = bytearray(vertex_data)
             buffer_bytes[vertex_offset:vertex_offset + sizeof(VertexData)] = packed_data
