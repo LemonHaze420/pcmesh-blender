@@ -720,22 +720,24 @@ def write_indices(resource_file, indices, primitive_type, enable_normals: bool):
 
 class UserMeshData:
     """Class to store user mesh data."""
-    def __init__(self, vertices, indices, normals, uvs, bone_indices, bone_weights):
+    def __init__(self, vertices, indices, normals, uvs, bones, bone_indices, bone_weights):
         self.vertices = vertices
         self.indices = indices
         self.normals = normals
         self.uvs = uvs
+        self.bones= bones
         self.bone_indices = bone_indices
         self.bone_weights = bone_weights
 
     def __repr__(self):
-        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, normals={len(self.normals)}, uvs={len(self.uvs)}, bone_indices={len(self.bone_indices)}, bone_weights={len(self.bone_weights)})"    
+        return f"UserMeshData(vertices={len(self.vertices)}, indices={len(self.indices)}, normals={len(self.normals)}, uvs={len(self.uvs)}, bones={len(self.bones)}, bone_indices={len(self.bone_indices)}, bone_weights={len(self.bone_weights)})"    
 
 class MeshData:
     """Class to store parsed mesh data."""
     def __init__(self, name):
         self.name = name
         self.sections = []
+        self.bones = []
 
     def add_section(self, name, primitive_type, vertices, uvs, normals, indices, materials, bones=None):
         section_data = {
@@ -795,10 +797,11 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
 
         # extend
         if DEV_MODE and diff != 0:
-                buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
-                struct.pack_into("I", buffer_bytes, offset, meshSection.Name - diff)
+                if diff > 0:
+                        buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
+                struct.pack_into("I", buffer_bytes, offset, meshSection.Name + diff)
                 if meshSection.Material:
-                        struct.pack_into("I", buffer_bytes, offset + nglMeshSection.Material.offset, meshSection.Material - diff)
+                        struct.pack_into("I", buffer_bytes, offset + nglMeshSection.Material.offset, meshSection.Material + diff)
 
         if meshSection.m_stride == 64:
             class VertexData(Structure):
@@ -937,7 +940,20 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
 
     prev_NVertices = 0
     mesh_data = MeshData(name=ndisplay) 
-
+    
+    offset = Mesh.Bones
+    for _ in range(Mesh.NBones):
+        mat = struct.unpack_from('16f', buffer_bytes, offset)
+        matrix = [
+            [mat[0], mat[1], mat[2], mat[3]],
+            [mat[4], mat[5], mat[6], mat[7]],
+            [mat[8], mat[9], mat[10], mat[11]],
+            [mat[12], mat[13], mat[14], mat[15]],
+        ]
+        mesh_data.bones.append(matrix)
+        offset += 64
+    
+    
     for idx, section in enumerate(sections):
         offset = section.Section
         meshSection = nglMeshSection.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMeshSection))])

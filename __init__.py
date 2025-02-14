@@ -12,6 +12,7 @@ import bpy
 import sys
 import io
 import os
+import mathutils
 from mathutils import Vector
 from os import listdir
 from os.path import isfile, isdir, join, dirname, splitext
@@ -97,14 +98,18 @@ def create_mesh(path, mesh_data):
     bpy.ops.object.mode_set(mode='EDIT')
 
     bone_map = {}
-    for section in mesh_data.sections:
-        if section.get('bones'):
-            for bone_idx, bone_data in enumerate(section['bones']):
-                if f"Bone_{bone_idx}" not in bone_map:
-                    bone = armature.edit_bones.new(f"Bone_{bone_idx}")
-                    bone.head = Vector((0, 0, 0))
-                    bone.tail = Vector((0, 1, 0))
-                    bone_map[f"Bone_{bone_idx}"] = bone
+    root_bone = armature.edit_bones.new("Root")
+    root_bone.head = Vector((0, 0, 0))
+    root_bone.tail = Vector((0, 1/5, 0))
+    for bone_idx, matrix in enumerate(mesh_data.bones):
+        bn_name =f"Bone_{bone_idx}"
+        if bn_name not in bone_map:
+            bone = armature.edit_bones.new(bn_name)
+            pos = mathutils.Matrix(matrix).translation 
+            bone.head = pos
+            bone.tail = pos + Vector((0, 0.3, 0))
+            bone.parent = root_bone
+            bone_map[bn_name] = bone
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -151,14 +156,18 @@ def create_mesh(path, mesh_data):
         # Bones
         if section.get('bones'):
             for vtx_idx, bone_data in enumerate(section['bones']):
-                for bone_idx, weight in zip(bone_data['indices'], bone_data['weights']):
-                    bone_name = f"Bone_{int(bone_idx)}"
-                    if bone_name in obj.vertex_groups:
-                        group = obj.vertex_groups[bone_name]
-                    else:
-                        group = obj.vertex_groups.new(name=bone_name)
-                    group.add([vtx_idx], weight, 'ADD')
-
+                bone_indices = bone_data['indices']
+                bone_weights = bone_data['weights']
+                for i in range(4):
+                    weight = bone_weights[i]
+                    bone_idx = bone_indices[i]
+                    if weight > 0:
+                        bone_name = f"Bone_{int(bone_idx)}"
+                        if bone_name in obj.vertex_groups:
+                            group = obj.vertex_groups[bone_name]
+                        else:
+                            group = obj.vertex_groups.new(name=bone_name)
+                        group.add([vtx_idx], weight, 'ADD')
 
     print(f"Finished importing {mesh_data.name}")
     
@@ -171,7 +180,6 @@ class PCMESHImporter(bpy.types.Operator):
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     def execute(self, context):
         current_path = self.filepath
-        print(current_path)
         for mesh_data in read_meshfile(self.filepath):
                 create_mesh(self.filepath, mesh_data)
         return {'FINISHED'}
@@ -205,6 +213,7 @@ class PCMESHExporter(bpy.types.Operator):
         vertex_groups = obj.vertex_groups
         bone_indices = []
         bone_weights = []
+        bones = [] # @todo: fill names
         for v in mesh.vertices:
                 indices = []
                 weights = []
@@ -222,7 +231,7 @@ class PCMESHExporter(bpy.types.Operator):
                         weights = weights[:4]
                 bone_indices.append(tuple(indices))
                 bone_weights.append(tuple(weights))
-        write_meshfile(self.filepath, UserMeshData(vertices, indices, normals, uvs, bone_indices, bone_weights))
+        write_meshfile(self.filepath, UserMeshData(vertices, indices, normals, uvs, bones, bone_indices, bone_weights))
         return {'FINISHED'}
 
     def invoke(self, context, event):
