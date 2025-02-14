@@ -90,31 +90,34 @@ def assign_texture_to_object(texture_path, object_name, mat=0):
 
 
 def create_mesh(path, mesh_data):
-    armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")
-    armature_name = f"{mesh_data.name}_Armature"
-    armature_object = bpy.data.objects.new(armature_name, armature)
-    armature_object.rotation_euler[0] = 90 * (3.1415927 / 180)
-    bpy.context.collection.objects.link(armature_object)
-    bpy.context.view_layer.objects.active = armature_object
     
     # create all bones first
-    bpy.ops.object.mode_set(mode='EDIT')
     bone_map = {}
-    root_bone = armature.edit_bones.new("Root")
-    root_bone.head = Vector((0, 0, 0))
-    root_bone.tail = Vector((0, 0.1, 0))
-    for bone_idx, matrix in enumerate(mesh_data.bones):
-        bn_name =f"Bone_{bone_idx}"
-        if bn_name not in bone_map:
-            bone = armature.edit_bones.new(bn_name)
-            pos = Vector((matrix[3][0], matrix[3][1], matrix[3][2]))
-            bone.head = pos
-            rotation_matrix = matrix.to_3x3()
-            direction = rotation_matrix @ Vector((0, 1, 0))
-            bone.tail = bone.head + (direction * 0.1)
-            bone.parent = root_bone
-            bone_map[bn_name] = bone
-    bpy.ops.object.mode_set(mode='OBJECT')
+    armature_object = None
+    if len(mesh_data.bones):
+        armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")
+        armature_name = f"{mesh_data.name}_Armature"
+        armature_object = bpy.data.objects.new(armature_name, armature)
+        armature_object.rotation_euler[0] = 90 * (3.1415927 / 180)
+        bpy.context.collection.objects.link(armature_object)
+        bpy.context.view_layer.objects.active = armature_object
+    
+        bpy.ops.object.mode_set(mode='EDIT')
+        root_bone = armature.edit_bones.new("Root")
+        root_bone.head = Vector((0, 0, 0))
+        root_bone.tail = Vector((0, 0.1, 0))
+        for bone_idx, matrix in enumerate(mesh_data.bones):
+            bn_name =f"Bone_{bone_idx}"
+            if bn_name not in bone_map:
+                bone = armature.edit_bones.new(bn_name)
+                pos = Vector((matrix[3][0], matrix[3][1], matrix[3][2]))
+                bone.head = pos
+                rotation_matrix = matrix.to_3x3()
+                direction = rotation_matrix @ Vector((0, 1, 0))
+                bone.tail = bone.head + (direction * 0.1)
+                bone.parent = root_bone
+                bone_map[bone_idx] = bn_name
+        bpy.ops.object.mode_set(mode='OBJECT')
 
     for section in mesh_data.sections:
         mesh = bpy.data.meshes.new(section['name'])
@@ -153,10 +156,9 @@ def create_mesh(path, mesh_data):
         #       mesh.normals_split_custom_set_from_vertices(section['normals'])
         #       mesh.use_auto_smooth = True
 
-        obj.parent = armature_object
-
         # Bones
         if section.get('bones'):
+            obj.parent = armature_object
             for vtx_idx, bone_data in enumerate(section['bones']):
                 bone_indices = bone_data['indices']
                 bone_weights = bone_data['weights']
@@ -164,7 +166,7 @@ def create_mesh(path, mesh_data):
                     weight = bone_weights[i]
                     bone_idx = bone_indices[i]
                     if weight > 0:
-                        bone_name = f"Bone_{int(bone_idx)}"
+                        bone_name = bone_map[bone_idx]
                         if bone_name in obj.vertex_groups:
                             group = obj.vertex_groups[bone_name]
                         else:
