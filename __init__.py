@@ -14,6 +14,7 @@ import io
 import os
 import mathutils
 from mathutils import Vector
+from mathutils import Matrix
 from os import listdir
 from os.path import isfile, isdir, join, dirname, splitext
 
@@ -95,22 +96,24 @@ def create_mesh(path, mesh_data):
     armature_object.rotation_euler[0] = 90 * (3.1415927 / 180)
     bpy.context.collection.objects.link(armature_object)
     bpy.context.view_layer.objects.active = armature_object
+    
+    # create all bones first
     bpy.ops.object.mode_set(mode='EDIT')
-
     bone_map = {}
     root_bone = armature.edit_bones.new("Root")
     root_bone.head = Vector((0, 0, 0))
-    root_bone.tail = Vector((0, 1/5, 0))
+    root_bone.tail = Vector((0, 0.1, 0))
     for bone_idx, matrix in enumerate(mesh_data.bones):
         bn_name =f"Bone_{bone_idx}"
         if bn_name not in bone_map:
             bone = armature.edit_bones.new(bn_name)
-            pos = mathutils.Matrix(matrix).translation 
+            pos = Vector((matrix[3][0], matrix[3][1], matrix[3][2]))
             bone.head = pos
-            bone.tail = pos + Vector((0, 0.3, 0))
+            rotation_matrix = matrix.to_3x3()
+            direction = rotation_matrix @ Vector((0, 1, 0))
+            bone.tail = bone.head + (direction * 0.1)
             bone.parent = root_bone
             bone_map[bn_name] = bone
-
     bpy.ops.object.mode_set(mode='OBJECT')
 
     for section in mesh_data.sections:
@@ -142,7 +145,6 @@ def create_mesh(path, mesh_data):
         section0 = mesh_data.sections[0]
         if section0.get('materials'):
             assign_texture_to_object(os.path.join(os.path.dirname(path), section0['materials'][0]), section['name'])
-            print(f"Assigned texture")
             
         # Normals
         #if section['normals']:

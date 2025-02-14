@@ -2,6 +2,8 @@ import io
 import os
 import struct
 import ctypes
+import mathutils
+
 from ctypes import *
 from enum import IntEnum
 
@@ -754,7 +756,6 @@ class MeshData:
 
 
 current_path = ""
-
 DEV_MODE=0
 
 def align_address(size, alignment):
@@ -944,14 +945,9 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
     offset = Mesh.Bones
     for _ in range(Mesh.NBones):
         mat = struct.unpack_from('16f', buffer_bytes, offset)
-        matrix = [
-            [mat[0], mat[1], mat[2], mat[3]],
-            [mat[4], mat[5], mat[6], mat[7]],
-            [mat[8], mat[9], mat[10], mat[11]],
-            [mat[12], mat[13], mat[14], mat[15]],
-        ]
-        mesh_data.bones.append(matrix)
-        offset += 64
+        matrix = [mat[i:i+4] for i in range(0, 16, 4)]
+        mesh_data.bones.append(mathutils.Matrix(matrix))
+        offset += 4 * 4 * 4
     
     
     for idx, section in enumerate(sections):
