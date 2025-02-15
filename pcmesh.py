@@ -922,6 +922,20 @@ def write_meshfile(filepath, user_mesh):
                         struct.pack_into("I", buffer_bytes, entry.field_8, name_offs + diff)
                 if entry.field_8 != 0:
                         struct.pack_into("I", buffer_bytes, offset + nglDirectoryEntry.field_8.offset, entry.field_8 + diff)
+                if type_dir_entry == int(TypeDirectoryEntry.MESH):
+                        offset = entry.field_4
+                        mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
+                        struct.pack_into("I", buffer_bytes, offset + nglMesh.Name.offset, mesh.Name + diff)
+                        offset = Header.DirectoryEntries + i * sizeof(nglDirectoryEntry)
+                        toffs = int.from_bytes(buffer_bytes[offset+0x74:offset+0x74+4], byteorder='little')
+                        struct.pack_into("I", buffer_bytes, offset+0x74, toffs + diff)
+                if type_dir_entry == int(TypeDirectoryEntry.MATERIAL):
+                        offset = entry.field_4
+                        Material = nglMaterialBase.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMaterialBase))])
+                        if Material.Name:
+                                struct.pack_into("I", buffer_bytes, offset + nglMaterialBase.Name.offset, Material.Name + diff)
+                                toffs = int.from_bytes(buffer_bytes[offset + nglMaterialBase.Name.offset+4:offset + nglMaterialBase.Name.offset+8], byteorder='little')
+                                struct.pack_into("I", buffer_bytes, offset + nglMaterialBase.Name.offset + 4, toffs + diff)
 
 
 
