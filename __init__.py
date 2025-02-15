@@ -219,22 +219,22 @@ class PCMESHExporter(bpy.types.Operator):
         bone_weights = []
         bones = [] # @todo: fill names
         for v in mesh.vertices:
-                indices = []
-                weights = []
+                bindices = []
+                bweights = []
                 for group in v.groups:
                         group_index = group.group
                         weight = group.weight
                         if group_index < len(vertex_groups):
-                                indices.append(group_index)
-                                weights.append(weight)
+                                bindices.append(group_index)
+                                bweights.append(weight)
                 while len(indices) < 4:
-                        indices.append(0)
-                        weights.append(0.0)
+                        bindices.append(0)
+                        bweights.append(0.0)
                 if len(indices) > 4:
-                        indices = indices[:4]
-                        weights = weights[:4]
-                bone_indices.append(tuple(indices))
-                bone_weights.append(tuple(weights))
+                        bindices = bindices[:4]
+                        bweights = bweights[:4]
+                bone_indices.append(tuple(bindices))
+                bone_weights.append(tuple(bweights))
         write_meshfile(self.filepath, UserMeshData(vertices, indices, normals, uvs, bones, bone_indices, bone_weights))
         return {'FINISHED'}
 

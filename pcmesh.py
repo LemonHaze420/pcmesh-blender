@@ -756,7 +756,7 @@ class MeshData:
 
 
 current_path = ""
-DEV_MODE=0
+DEV_MODE=1
 
 def align_address(size, alignment):
     return (size + (alignment - 1)) & ~(alignment - 1)
@@ -776,13 +776,13 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
         struct.pack_into("I", buffer_bytes, offset + nglMeshSection.NVertices.offset, len(user_mesh.vertices))
         struct.pack_into("I", buffer_bytes, offset + nglMeshSection.NIndices.offset, len(user_mesh.indices))
 
-        # delete existing verts & indices
         vertex_offset = meshSection.VertexBuffer.m_vertexData
         del buffer_bytes[vertex_offset:]
 
         index_offset = meshSection.m_indices
         index_end = index_offset + (meshSection.NIndices * 2)
         del buffer_bytes[index_offset:index_end]
+
         flattened_indices = []
         for idx_set in user_mesh.indices:
             if isinstance(idx_set, tuple):
@@ -790,20 +790,33 @@ def replace_mesh_data(buffer_bytes, offset, mesh, user_mesh):
             else:
                 flattened_indices.append(idx_set)
 
-        # insert new indices bytes into buffer_bytes
         new_bytes = b''.join(struct.pack("H", int(idx)) for idx in flattened_indices)
-        buffer_bytes[index_offset:index_offset] = new_bytes
-        new_end = index_offset + len(new_bytes)
-        diff = index_end - new_end
+        new_size = len(new_bytes)
+        new_end = index_offset + new_size
+        diff = index_end - new_end 
 
-        # extend
+
         if DEV_MODE and diff != 0:
-                if diff > 0:
-                        buffer_bytes[new_end:new_end] = bytearray(b"\x00" * diff)
+            if diff > 0:
+                buffer_bytes[index_offset:index_offset] = new_bytes
+                #buffer_bytes[new_end:new_end] = bytearray(diff)
+                buffer_bytes.extend(b'\x00' * diff)
+            elif diff < 0:
+                diff = abs(diff)
+                
+                old = buffer_bytes[index_offset:]
+                buffer_bytes[index_offset:new_end] = new_bytes
+                buffer_bytes.extend(b'\x00' * diff)
+                buffer_bytes[new_end:] = old
+                
+                
+                vertex_offset += diff
+                struct.pack_into("I", buffer_bytes, offset + nglMeshSection.VertexBuffer.offset + nglVertexBuffer.m_vertexData.offset, vertex_offset)
+                
                 struct.pack_into("I", buffer_bytes, offset, meshSection.Name + diff)
                 if meshSection.Material:
-                        struct.pack_into("I", buffer_bytes, offset + nglMeshSection.Material.offset, meshSection.Material + diff)
-
+                    struct.pack_into("I", buffer_bytes, offset + nglMeshSection.Material.offset, meshSection.Material + diff)
+            
         if meshSection.m_stride == 64:
             class VertexData(Structure):
                 _fields_ = [
@@ -906,9 +919,9 @@ def write_meshfile(filepath, user_mesh):
                 
                 name_offs = int.from_bytes(buffer_bytes[entry.field_8:entry.field_8+4], byteorder='little')
                 if name_offs != 0:
-                        struct.pack_into("I", buffer_bytes, entry.field_8, name_offs - diff)
+                        struct.pack_into("I", buffer_bytes, entry.field_8, name_offs + diff)
                 if entry.field_8 != 0:
-                        struct.pack_into("I", buffer_bytes, offset + nglDirectoryEntry.field_8.offset, entry.field_8 - diff)
+                        struct.pack_into("I", buffer_bytes, offset + nglDirectoryEntry.field_8.offset, entry.field_8 + diff)
 
 
 
