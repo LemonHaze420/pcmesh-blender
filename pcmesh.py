@@ -1128,7 +1128,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
     return mesh_data
 
 
-def read_meshfile(file):
+def read_meshfile(file, write_obj:bool = False):
     print("Resource pack:", file)
     current_path = file
     mesh_data = []
@@ -1188,6 +1188,6 @@ def read_meshfile(file):
 
                 offset = entry.field_4
                 mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
-                mesh_data.append(read_mesh(mesh, buffer_bytes, materials, False))
+                mesh_data.append(read_mesh(mesh, buffer_bytes, materials, write_obj))
     return mesh_data
 
