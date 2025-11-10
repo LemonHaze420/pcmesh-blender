@@ -13,6 +13,8 @@ import sys
 import io
 import os
 import mathutils
+
+from pathlib import Path
 from mathutils import Vector
 from mathutils import Matrix
 from os import listdir
@@ -42,8 +44,37 @@ def create_faces_from_indices(indices, primitive_type):
     else:
         print(f"Unsupported primitive type: {primitive_type}")
     return faces
+   
+def load_asset(asset_path):
+    p = Path(asset_path).expanduser()
+    if p.is_file():
+        return str(p)
+
+    parent = p.parent
+    if not parent.exists():
+        parent = Path.cwd()
+
+    filename = p.name
+
+    game_path = parent / "GAME" / filename
+    if game_path.is_file():
+        return str(game_path)
+    try:
+        for child in parent.iterdir():
+            if child.is_dir():
+                found = next(child.rglob(filename), None)
+                if found and found.is_file():
+                    return str(found)
+    except PermissionError:
+        pass
+    return None
 
 def assign_texture_to_object(texture_path, object_name, mat=0):
+    found_path = load_asset(texture_path)
+    if not found_path:
+        print(f"Can't find texture {texture_path}")
+        return
+    
     material = bpy.data.materials.new(name=f"{object_name}_Material{mat}")
     material.use_nodes = True
     nodes = material.node_tree.nodes
@@ -62,9 +93,9 @@ def assign_texture_to_object(texture_path, object_name, mat=0):
     image_texture.location = (-400, 0)
 
     try:
-        texture_image = bpy.data.images.load(texture_path)
+        texture_image = bpy.data.images.load(found_path)
     except RuntimeError:
-        print("Cannot load texture ", texture_path)
+        print("Cannot load texture ", found_path)
         return
     else:
         image_texture.image = texture_image
