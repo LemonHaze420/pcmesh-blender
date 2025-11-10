@@ -22,6 +22,8 @@ from os.path import isfile, isdir, join, dirname, splitext
 
 from .pcmesh import *
 
+created_first = False
+
 def create_faces_from_indices(indices, primitive_type):
     faces = []
     if primitive_type == 5:
@@ -118,95 +120,126 @@ def assign_texture_to_object(texture_path, object_name, mat=0):
     else:
         print(f"Object '{object_name}' not found")
 
+bone_ids = {
+    -1: "NO_BONE",
+     0: "BONE_PS",
+     1: "BONE_S",
+     2: "BONE_S1",
+     3: "BONE_S2",
+     4: "BONE_N",
+     5: "BONE_H",           #
+     6: "BONE_LC",     #
+     7: "BONE_LU",     #
+     8: "BONE_LF",      #
+     9: "BONE_LH",         #
+    10: "BONE_RC",     #
+    11: "BONE_RU",     #
+} 
+def get_bone_name(bone_idx: int) -> str:
+    return bone_ids.get(bone_idx, f"Bone_{int(bone_idx)}")
 
 
 def create_mesh(path, mesh_data):
-    
     # create all bones first
-    bone_map = {}
-    armature_object = None
-    if len(mesh_data.bones):
-        armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")
-        armature_name = f"{mesh_data.name}_Armature"
-        armature_object = bpy.data.objects.new(armature_name, armature)
-        armature_object.rotation_euler[0] = 90 * (3.1415927 / 180)
-        bpy.context.collection.objects.link(armature_object)
-        bpy.context.view_layer.objects.active = armature_object
+    armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")
+    armature_name = f"{mesh_data.name}_Armature"
+    armature_object = bpy.data.objects.new(armature_name, armature)
+    armature_object.rotation_euler[0] = 90 * (3.1415927 / 180)
+    bpy.context.collection.objects.link(armature_object)
+    bpy.context.view_layer.objects.active = armature_object
     
-        bpy.ops.object.mode_set(mode='EDIT')
-        root_bone = armature.edit_bones.new("Root")
-        root_bone.head = Vector((0, 0, 0))
-        root_bone.tail = Vector((0, 0.1, 0))
-        for bone_idx, matrix in enumerate(mesh_data.bones):
-            bn_name =f"Bone_{bone_idx}"
-            if bn_name not in bone_map:
-                bone = armature.edit_bones.new(bn_name)
-                pos = Vector((matrix[3][0], matrix[3][1], matrix[3][2]))
-                bone.head = pos
-                rotation_matrix = matrix.to_3x3()
-                direction = rotation_matrix @ Vector((0, 1, 0))
-                bone.tail = bone.head + (direction * 0.1)
-                bone.parent = root_bone
-                bone_map[bone_idx] = bn_name
-        bpy.ops.object.mode_set(mode='OBJECT')
-
+    bpy.ops.object.mode_set(mode='EDIT')
+    bone_map = {}
+    arm = armature_object
+    edit_bones = arm.data.edit_bones
+    for bone_idx, mat_data in enumerate(mesh_data.bones):
+        bone_name = get_bone_name(bone_idx)
+        mat = Matrix(mat_data).transposed()
+        eb = edit_bones.new(bone_name)
+        eb.head = mat.to_translation()
+        eb.tail = eb.head + (mat.to_3x3() @ Vector((-1, 0, 0))) * 0.1
+        eb.roll = 0.0
+        bone_map[bone_name] = eb
+    all_vertices = []
+    all_faces = []
+    all_uvs = []
+    all_section_bone_data = []
+    vertex_offset = 0
+    
+    # collect geom
+    bpy.ops.object.mode_set(mode='OBJECT')
     for section in mesh_data.sections:
-        mesh = bpy.data.meshes.new(section['name'])
-        obj = bpy.data.objects.new(section['name'], mesh)
-        bpy.context.collection.objects.link(obj)
+        verts = [Vector(v) for v in section['vertices']]
+        prim = section['primitive_type']
 
-        vertices = [Vector(v) for v in section['vertices']]
-        indices = section['indices']
-        primitive_type = section['primitive_type']
+        faces = create_faces_from_indices(indices=section['indices'], primitive_type=prim)
+        faces = [tuple(v + vertex_offset for v in face) for face in faces]
 
-        # Faces
-        faces = create_faces_from_indices(indices, primitive_type)
-        if not faces:
-            continue
+        all_vertices.extend(verts)
+        all_faces.extend(faces)
 
-        mesh.from_pydata(vertices, [], faces)
-        mesh.update()
+        if section.get("uvs"):
+            all_uvs.extend(section["uvs"])
+        else:
+            all_uvs.extend([None] * len(verts))
 
-        # UVs
-        if section['uvs']:
-            if len(section['uvs']) == len(vertices):
-                uv_layer = mesh.uv_layers.new(name="UVMap")
-                for loop in mesh.loops:
-                    loop_uv = uv_layer.data[loop.index]
-                    loop_uv.uv = [ section['uvs'][loop.vertex_index][0], 1.0 - section['uvs'][loop.vertex_index][1] ]
+        if section.get("bones"):
+            all_section_bone_data.append((vertex_offset, section["bones"]))
 
-        # Materials
-        section0 = mesh_data.sections[0]
-        if section0.get('materials'):
-            assign_texture_to_object(os.path.join(os.path.dirname(path), section0['materials'][0]), section['name'])
-            
+        vertex_offset += len(verts)
+
+    mesh = bpy.data.meshes.new(mesh_data.name)
+    obj = bpy.data.objects.new(mesh_data.name, mesh)
+    global created_first
+    if created_first:
+        armature_object.hide_viewport = True
+        obj.hide_viewport = True
+    else:
+        created_first = True
+
+    bpy.context.collection.objects.link(obj)
+
+    mesh.from_pydata(all_vertices, [], all_faces)
+    mesh.update()
+
+    if any(all_uvs):
+        uv_layer = mesh.uv_layers.new()
+        for loop in mesh.loops:
+            idx = loop.vertex_index
+            uv = all_uvs[idx]
+            if uv:
+                uv_layer.data[loop.index].uv = (uv[0], 1.0 - uv[1])
+
+    # map sections
+    for vertex_offset, section_bones in all_section_bone_data:
+        for local_idx, bone_data in enumerate(section_bones):
+            for bone_idx, weight in zip(bone_data["indices"], bone_data["weights"]):
+                bone_name = get_bone_name(bone_idx)
+
+                if bone_name not in obj.vertex_groups:
+                    obj.vertex_groups.new(name=bone_name)
+
+                obj.vertex_groups[bone_name].add(
+                    [vertex_offset + local_idx], weight, 'ADD'
+                )
+    mod = obj.modifiers.new(name="Armature", type='ARMATURE')
+    mod.object = armature_object
+    
+    section0 = mesh_data.sections[0]
+    if section0.get('materials'):       # @todo: multiple mats
+        assign_texture_to_object(os.path.join(os.path.dirname(path), section0['materials'][0]), mesh_data.name)#section['name'])                
+    obj.parent = armature_object
+    
+    """
         # Normals
         #if section['normals']:
         #   if len(section['normals']) == len(vertices):
         #       mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
         #       mesh.normals_split_custom_set_from_vertices(section['normals'])
         #       mesh.use_auto_smooth = True
-
-        # Bones
-        if section.get('bones'):
-            obj.parent = armature_object
-            for vtx_idx, bone_data in enumerate(section['bones']):
-                bone_indices = bone_data['indices']
-                bone_weights = bone_data['weights']
-                for i in range(4):
-                    weight = bone_weights[i]
-                    bone_idx = bone_indices[i]
-                    if weight > 0:
-                        bone_name = bone_map[bone_idx]
-                        if bone_name in obj.vertex_groups:
-                            group = obj.vertex_groups[bone_name]
-                        else:
-                            group = obj.vertex_groups.new(name=bone_name)
-                        group.add([vtx_idx], weight, 'ADD')
-
+    """
     print(f"Finished importing {mesh_data.name}")
-    
-    
+    return obj
 
 class PCMESHImporter(bpy.types.Operator):
     bl_idname = "import_scene.pcmesh"
@@ -215,6 +248,7 @@ class PCMESHImporter(bpy.types.Operator):
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     def execute(self, context):
         current_path = self.filepath
+        created_first = False
         for mesh_data in read_meshfile(self.filepath):
                 create_mesh(self.filepath, mesh_data)
         return {'FINISHED'}
