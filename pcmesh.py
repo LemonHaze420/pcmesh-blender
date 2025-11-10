@@ -1083,24 +1083,11 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
         #resource_file.write(str(list(indices)) + '\n')
         if write_obj:
                 resource_file.write("\n\n")
-        if meshSection.m_stride == 64:
-                for vtx in vertex_data:
-                    bones_scale = 3.0
-                    bones_offset = 11.0
-                    #indices = [0.0, 0.0, 0.0, 0.0]
-                    #indices[0] = vtx.bone_indices[0] * bones_scale + bones_offset
-                    #indices[1] = vtx.bone_indices[1] * bones_scale + bones_offset
-                    #indices[2] = vtx.bone_indices[2] * bones_scale + bones_offset
-                    #indices[3] = vtx.bone_indices[3] * bones_scale + bones_offset
-                    #print("indices " + ("%f %.6f %.6f %.6f" % (indices[0], indices[1], indices[2], indices[3])) + '\n')
-                    
-                    
-               
         vertices = []
         uvs = []
         normals = []
-        bones = []  
         indices = list(indices_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(indices_data_t))]))
+
         for vtx in vertex_data:
             vertices.append((
                 round(vtx.pos[0], 6),
@@ -1111,22 +1098,50 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
                 uvs.append(tuple(vtx.uv))
             if hasattr(vtx, 'normal'):
                 normals.append(tuple(vtx.normal))
-            if hasattr(vtx, 'bone_indices') and hasattr(vtx, 'bone_weights'):
-                bones.append({
-                    "indices": list(vtx.bone_indices),
-                    "weights": list(vtx.bone_weights)
-                })  
-        #if not mesh_data.sections:
-        mesh_data.add_section(name=ndisplay + '_' + str(idx),
-                              primitive_type=meshSection.m_primitiveType,
-                              vertices=vertices,
-                              uvs=uvs,
-                              normals=normals,
-                              indices=indices,
-                              materials=materials,
-                              bones=bones)
-    return mesh_data
 
+        local_bones = []
+        if meshSection.m_stride == 64:
+            for vtx in vertex_data:
+                local_bones.append({
+                    "indices": [int(x) for x in vtx.bone_indices],
+                    "weights": [float(x) for x in vtx.bone_weights]
+                })
+                
+        section_bones_idx = []
+        if meshSection.NBones and meshSection.BonesIdx:
+            off_bones_idx = meshSection.BonesIdx
+            bones_idx_t = c_ushort * int(meshSection.NBones)
+            section_bones_idx = list(bones_idx_t.from_buffer_copy(buffer_bytes[off_bones_idx : (off_bones_idx + sizeof(bones_idx_t))]))
+
+        bones_mapped = []
+        if local_bones:
+            for v in local_bones:
+                local_idxs = [int(x) for x in v["indices"]]
+                weights = [float(x) for x in v["weights"]]
+                final_idxs = []
+                if section_bones_idx:
+                    for li in local_idxs:
+                        if li < 0:
+                            final_idxs.append(-1)
+                        elif 0 <= li < len(section_bones_idx):
+                            final_idxs.append(int(section_bones_idx[li]))
+                        else:
+                            final_idxs.append(int(li))
+                else:
+                    final_idxs = [int(li) for li in local_idxs]
+                bones_mapped.append({"indices": final_idxs, "weights": weights})
+
+        mesh_data.add_section(
+            name=ndisplay + '_' + str(idx),
+            primitive_type=meshSection.m_primitiveType,
+            vertices=vertices,
+            uvs=uvs,
+            normals=normals,
+            indices=indices,
+            materials=materials,
+            bones=bones_mapped
+        )        
+    return mesh_data
 
 def read_meshfile(file, write_obj:bool = False):
     print("Resource pack:", file)
