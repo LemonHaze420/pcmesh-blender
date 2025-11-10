@@ -248,6 +248,7 @@ class PCMESHImporter(bpy.types.Operator):
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     def execute(self, context):
         current_path = self.filepath
+        global created_first
         created_first = False
         for mesh_data in read_meshfile(self.filepath):
                 create_mesh(self.filepath, mesh_data)
