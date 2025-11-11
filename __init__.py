@@ -58,17 +58,20 @@ def load_asset(asset_path):
 
     filename = p.name
 
-    game_path = parent / "GAME" / filename
+    game_path = parent.parent / "GAME" / filename
     if game_path.is_file():
         return str(game_path)
     try:
-        for child in parent.iterdir():
-            if child.is_dir():
-                found = next(child.rglob(filename), None)
-                if found and found.is_file():
-                    return str(found)
+        root = parent.parent
+        if root.exists():
+            for child in root.iterdir():
+                if child.is_dir():
+                    found = next(child.rglob(filename), None)
+                    if found and found.is_file():
+                        return str(found)
     except PermissionError:
         pass
+
     return None
 
 def assign_texture_to_object(texture_path, object_name, mat=0):
@@ -190,13 +193,6 @@ def create_mesh(path, mesh_data):
 
     mesh = bpy.data.meshes.new(mesh_data.name)
     obj = bpy.data.objects.new(mesh_data.name, mesh)
-    global created_first
-    if created_first:
-        armature_object.hide_viewport = True
-        obj.hide_viewport = True
-    else:
-        created_first = True
-
     bpy.context.collection.objects.link(obj)
 
     mesh.from_pydata(all_vertices, [], all_faces)
