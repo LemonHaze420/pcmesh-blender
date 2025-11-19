@@ -318,3 +318,197 @@ def get_parent_bone_name(skel_data: dict, bone_idx: int) -> str:
     if parent_id == -1:
         return "ROOT" 
     return bone_map.get(parent_id, f"Bone_{parent_id}")
+    
+def apply_torso_head_chains(skel_data, idx_to_bone, root_eb):
+    for comp in skel_data.get("components", []):
+        t = comp.get("type_id")
+        if t not in (
+            NalComponentType.TorsoHead_TwoNeck_Compressed,
+            NalComponentType.TorsoHead_OneNeck_Compressed,
+        ):
+            continue
+
+        bone_ixs = comp["bone_indices"]
+
+        pelvis_id = bone_ixs[TorsoHeadBones.PELVIS.value]
+        spine_id  = bone_ixs[TorsoHeadBones.SPINE.value]
+        spine1_id = bone_ixs[TorsoHeadBones.SPINE1.value]
+        spine2_id = bone_ixs[TorsoHeadBones.SPINE2.value]
+        neck_id   = bone_ixs[TorsoHeadBones.NECK.value]
+        head_id   = bone_ixs[TorsoHeadBones.HEAD.value]
+
+        chain = [pelvis_id, spine_id, spine1_id, spine2_id, neck_id, head_id]
+
+        # pelvis under ROOT
+        if pelvis_id in idx_to_bone:
+            idx_to_bone[pelvis_id].parent = root_eb
+
+        # spine chain
+        for parent_id, child_id in zip(chain, chain[1:]):
+            if parent_id in idx_to_bone and child_id in idx_to_bone:
+                idx_to_bone[child_id].parent = idx_to_bone[parent_id]
+                
+        other_ixs = comp.get("other_matrix_indices")
+        if other_ixs:
+            other_id = other_ixs[0]
+            if other_id in idx_to_bone and pelvis_id in idx_to_bone:
+                idx_to_bone[other_id].parent = idx_to_bone[pelvis_id]    
+                
+def apply_leg_chains(skel_data, idx_to_bone):
+    for comp in skel_data.get("components", []):
+        if comp.get("type_id") != NalComponentType.LegsFeet_IK_Compressed:
+            continue
+
+        bone_ixs = comp["bone_indices"]
+
+        l_toe_id   = bone_ixs[LegsBones.L_TOE.value]
+        r_toe_id   = bone_ixs[LegsBones.R_TOE.value]
+        l_foot_id  = bone_ixs[LegsBones.L_FOOT.value]
+        r_foot_id  = bone_ixs[LegsBones.R_FOOT.value]
+        l_thigh_id = bone_ixs[LegsBones.L_THIGH.value]
+        l_calf_id  = bone_ixs[LegsBones.L_CALF.value]
+        r_thigh_id = bone_ixs[LegsBones.R_THIGH.value]
+        r_calf_id  = bone_ixs[LegsBones.R_CALF.value]
+
+        # thigh to calf -> foot -> toe
+        chains = [
+            (l_thigh_id, l_calf_id),
+            (l_calf_id,  l_foot_id),
+            (l_foot_id,  l_toe_id),
+
+            (r_thigh_id, r_calf_id),
+            (r_calf_id,  r_foot_id),
+            (r_foot_id,  r_toe_id),
+        ]
+
+        for parent_id, child_id in chains:
+            if parent_id in idx_to_bone and child_id in idx_to_bone:
+                idx_to_bone[child_id].parent = idx_to_bone[parent_id]
+                
+def apply_arm_chains(skel_data, idx_to_bone):
+    for comp in skel_data.get("components", []):
+        if comp.get("type_id") != NalComponentType.ArmsHands_IK_Compressed:
+            continue
+
+        bone_ixs = comp["bone_indices"]
+
+        l_clav_id   = bone_ixs[ArmsHandsIKBones.L_CLAVICLE.value]
+        r_clav_id   = bone_ixs[ArmsHandsIKBones.R_CLAVICLE.value]
+        l_hand_id   = bone_ixs[ArmsHandsIKBones.L_HAND.value]
+        r_hand_id   = bone_ixs[ArmsHandsIKBones.R_HAND.value]
+        l_upper_id  = bone_ixs[ArmsHandsIKBones.L_UPPERARM.value]
+        r_upper_id  = bone_ixs[ArmsHandsIKBones.R_UPPERARM.value]
+        l_forearm_id = bone_ixs[ArmsHandsIKBones.L_FOREARM.value]
+        r_forearm_id = bone_ixs[ArmsHandsIKBones.R_FOREARM.value]
+
+        chains = [
+            (l_clav_id,   l_upper_id),
+            (l_upper_id,  l_forearm_id),
+            (l_forearm_id, l_hand_id),
+
+            (r_clav_id,   r_upper_id),
+            (r_upper_id,  r_forearm_id),
+            (r_forearm_id, r_hand_id),
+        ]
+
+        for parent_id, child_id in chains:
+            if parent_id in idx_to_bone and child_id in idx_to_bone:
+                idx_to_bone[child_id].parent = idx_to_bone[parent_id]
+                
+        other_ixs = comp.get("other_matrix_indices", ())
+        if len(other_ixs) >= 4:
+            l_twist0_id, l_twist1_id, r_twist0_id, r_twist1_id = other_ixs[:4]
+
+            # left twists: forearm -> twist0 -> twist1
+            if l_forearm_id in idx_to_bone and l_twist0_id in idx_to_bone:
+                idx_to_bone[l_twist0_id].parent = idx_to_bone[l_forearm_id]
+            if l_twist1_id in idx_to_bone and l_twist0_id in idx_to_bone:
+                idx_to_bone[l_twist1_id].parent = idx_to_bone[l_twist0_id]
+
+            # right twists: forearm -> twist0 -> twist1
+            if r_forearm_id in idx_to_bone and r_twist0_id in idx_to_bone:
+                idx_to_bone[r_twist0_id].parent = idx_to_bone[r_forearm_id]
+            if r_twist1_id in idx_to_bone and r_twist0_id in idx_to_bone:
+                idx_to_bone[r_twist1_id].parent = idx_to_bone[r_twist0_id]
+                
+def apply_finger_chains(skel_data, idx_to_bone):
+    for comp in skel_data.get("components", []):
+        if comp.get("type_id") != NalComponentType.FiveFinger_Top2KnuckleCurl:
+            continue
+
+        bone_ixs = comp["bone_indices"]
+
+        def bid(role: FingerBones):
+            return bone_ixs[role.value]
+
+        # Left thumb: 0 -> 01 -> 02
+        thumb_chain = [
+            (bid(FingerBones.L_FINGER_0),  bid(FingerBones.L_FINGER_01)),
+            (bid(FingerBones.L_FINGER_01), bid(FingerBones.L_FINGER_02)),
+        ]
+
+        # base -> mid -> tip
+        left_finger_chains = []
+        for base, mid, tip in [
+            (FingerBones.L_FINGER_1,  FingerBones.L_FINGER_11, FingerBones.L_FINGER_12),
+            (FingerBones.L_FINGER_2,  FingerBones.L_FINGER_21, FingerBones.L_FINGER_22),
+            (FingerBones.L_FINGER_3,  FingerBones.L_FINGER_31, FingerBones.L_FINGER_32),
+            (FingerBones.L_FINGER_4,  FingerBones.L_FINGER_41, FingerBones.L_FINGER_42),
+        ]:
+            b = bid(base); m = bid(mid); t = bid(tip)
+            left_finger_chains.extend([(b, m), (m, t)])
+
+        # Right thumb: 0 -> 01 -> 02
+        right_thumb_chain = [
+            (bid(FingerBones.R_FINGER_0),  bid(FingerBones.R_FINGER_01)),
+            (bid(FingerBones.R_FINGER_01), bid(FingerBones.R_FINGER_02)),
+        ]
+
+        right_finger_chains = []
+        for base, mid, tip in [
+            (FingerBones.R_FINGER_1,  FingerBones.R_FINGER_11, FingerBones.R_FINGER_12),
+            (FingerBones.R_FINGER_2,  FingerBones.R_FINGER_21, FingerBones.R_FINGER_22),
+            (FingerBones.R_FINGER_3,  FingerBones.R_FINGER_31, FingerBones.R_FINGER_32),
+            (FingerBones.R_FINGER_4,  FingerBones.R_FINGER_41, FingerBones.R_FINGER_42),
+        ]:
+            b = bid(base); m = bid(mid); t = bid(tip)
+            right_finger_chains.extend([(b, m), (m, t)])
+
+        for parent_id, child_id in (
+            thumb_chain
+            + left_finger_chains
+            + right_thumb_chain
+            + right_finger_chains
+        ):
+            if parent_id in idx_to_bone and child_id in idx_to_bone:
+                idx_to_bone[child_id].parent = idx_to_bone[parent_id]
+
+        l_hand_parent_id = bid(FingerBones.L_HAND_PARENT)
+        r_hand_parent_id = bid(FingerBones.R_HAND_PARENT)
+
+        left_bases = [
+            bid(FingerBones.L_FINGER_0),
+            bid(FingerBones.L_FINGER_1),
+            bid(FingerBones.L_FINGER_2),
+            bid(FingerBones.L_FINGER_3),
+            bid(FingerBones.L_FINGER_4),
+        ]
+        right_bases = [
+            bid(FingerBones.R_FINGER_0),
+            bid(FingerBones.R_FINGER_1),
+            bid(FingerBones.R_FINGER_2),
+            bid(FingerBones.R_FINGER_3),
+            bid(FingerBones.R_FINGER_4),
+        ]
+
+        if l_hand_parent_id in idx_to_bone:
+            hp = idx_to_bone[l_hand_parent_id]
+            for b_id in left_bases:
+                if b_id in idx_to_bone:
+                    idx_to_bone[b_id].parent = hp
+
+        if r_hand_parent_id in idx_to_bone:
+            hp = idx_to_bone[r_hand_parent_id]
+            for b_id in right_bases:
+                if b_id in idx_to_bone:
+                    idx_to_bone[b_id].parent = hp

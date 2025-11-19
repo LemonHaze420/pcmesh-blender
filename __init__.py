@@ -222,6 +222,12 @@ def create_mesh(path, mesh_data):
             eb.parent = parent_eb    
         
     
+    # remapping chain
+    apply_torso_head_chains(skel_data, idx_to_bone, root_eb)
+    apply_leg_chains(skel_data, idx_to_bone)
+    apply_arm_chains(skel_data, idx_to_bone)
+    apply_finger_chains(skel_data, idx_to_bone)
+
 
     # collect geom
     all_vertices = []
