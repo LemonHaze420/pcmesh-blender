@@ -355,6 +355,17 @@ def apply_torso_head_chains(skel_data, idx_to_bone, root_eb):
                 idx_to_bone[other_id].parent = idx_to_bone[pelvis_id]    
                 
 def apply_leg_chains(skel_data, idx_to_bone):
+    pelvis_id = None
+    for comp in skel_data.get("components", []):
+        t = comp.get("type_id")
+        if t in (
+            NalComponentType.TorsoHead_TwoNeck_Compressed,
+            NalComponentType.TorsoHead_OneNeck_Compressed,
+        ):
+            bone_ixs = comp["bone_indices"]
+            pelvis_id = bone_ixs[TorsoHeadBones.PELVIS.value]
+            break
+
     for comp in skel_data.get("components", []):
         if comp.get("type_id") != NalComponentType.LegsFeet_IK_Compressed:
             continue
@@ -369,6 +380,17 @@ def apply_leg_chains(skel_data, idx_to_bone):
         l_calf_id  = bone_ixs[LegsBones.L_CALF.value]
         r_thigh_id = bone_ixs[LegsBones.R_THIGH.value]
         r_calf_id  = bone_ixs[LegsBones.R_CALF.value]
+
+
+        legs_parent = None
+        if pelvis_id is not None and pelvis_id in idx_to_bone:
+            legs_parent = idx_to_bone[pelvis_id]
+            
+        if legs_parent is not None:
+            if r_thigh_id in idx_to_bone:
+                idx_to_bone[r_thigh_id].parent = legs_parent
+            if l_thigh_id in idx_to_bone:
+                idx_to_bone[l_thigh_id].parent = legs_parent
 
         # thigh to calf -> foot -> toe
         chains = [
@@ -386,35 +408,55 @@ def apply_leg_chains(skel_data, idx_to_bone):
                 idx_to_bone[child_id].parent = idx_to_bone[parent_id]
                 
 def apply_arm_chains(skel_data, idx_to_bone):
+    spine2_id = None
+    for comp in skel_data.get("components", []):
+        t = comp.get("type_id")
+        if t in (
+            NalComponentType.TorsoHead_TwoNeck_Compressed,
+            NalComponentType.TorsoHead_OneNeck_Compressed,
+        ):
+            bone_ixs = comp["bone_indices"]
+            spine2_id = bone_ixs[TorsoHeadBones.SPINE2.value]
+            break
+
+    has_arms_ik = False
     for comp in skel_data.get("components", []):
         if comp.get("type_id") != NalComponentType.ArmsHands_IK_Compressed:
             continue
 
+        has_arms_ik = True
         bone_ixs = comp["bone_indices"]
 
-        l_clav_id   = bone_ixs[ArmsHandsIKBones.L_CLAVICLE.value]
-        r_clav_id   = bone_ixs[ArmsHandsIKBones.R_CLAVICLE.value]
-        l_hand_id   = bone_ixs[ArmsHandsIKBones.L_HAND.value]
-        r_hand_id   = bone_ixs[ArmsHandsIKBones.R_HAND.value]
-        l_upper_id  = bone_ixs[ArmsHandsIKBones.L_UPPERARM.value]
-        r_upper_id  = bone_ixs[ArmsHandsIKBones.R_UPPERARM.value]
+        l_clav_id    = bone_ixs[ArmsHandsIKBones.L_CLAVICLE.value]
+        r_clav_id    = bone_ixs[ArmsHandsIKBones.R_CLAVICLE.value]
+        l_hand_id    = bone_ixs[ArmsHandsIKBones.L_HAND.value]
+        r_hand_id    = bone_ixs[ArmsHandsIKBones.R_HAND.value]
+        l_upper_id   = bone_ixs[ArmsHandsIKBones.L_UPPERARM.value]
+        r_upper_id   = bone_ixs[ArmsHandsIKBones.R_UPPERARM.value]
         l_forearm_id = bone_ixs[ArmsHandsIKBones.L_FOREARM.value]
         r_forearm_id = bone_ixs[ArmsHandsIKBones.R_FOREARM.value]
 
+        if spine2_id is not None and spine2_id in idx_to_bone:
+            spine2_bone = idx_to_bone[spine2_id]
+            if l_clav_id in idx_to_bone:
+                idx_to_bone[l_clav_id].parent = spine2_bone
+            if r_clav_id in idx_to_bone:
+                idx_to_bone[r_clav_id].parent = spine2_bone
+
         chains = [
-            (l_clav_id,   l_upper_id),
-            (l_upper_id,  l_forearm_id),
+            (l_clav_id,    l_upper_id),
+            (l_upper_id,   l_forearm_id),
             (l_forearm_id, l_hand_id),
 
-            (r_clav_id,   r_upper_id),
-            (r_upper_id,  r_forearm_id),
+            (r_clav_id,    r_upper_id),
+            (r_upper_id,   r_forearm_id),
             (r_forearm_id, r_hand_id),
         ]
 
         for parent_id, child_id in chains:
             if parent_id in idx_to_bone and child_id in idx_to_bone:
                 idx_to_bone[child_id].parent = idx_to_bone[parent_id]
-                
+
         other_ixs = comp.get("other_matrix_indices", ())
         if len(other_ixs) >= 4:
             l_twist0_id, l_twist1_id, r_twist0_id, r_twist1_id = other_ixs[:4]
@@ -430,7 +472,70 @@ def apply_arm_chains(skel_data, idx_to_bone):
                 idx_to_bone[r_twist0_id].parent = idx_to_bone[r_forearm_id]
             if r_twist1_id in idx_to_bone and r_twist0_id in idx_to_bone:
                 idx_to_bone[r_twist1_id].parent = idx_to_bone[r_twist0_id]
-                
+
+    if has_arms_ik:
+        return
+
+    for comp in skel_data.get("components", []):
+        if comp.get("type_id") != NalComponentType.ArmsHands_Compressed:
+            continue
+
+        bone_ixs = comp["bone_indices"]
+
+        l_clav_id    = bone_ixs[ArmHandsCompressedBones.L_CLAVICLE.value]
+        r_clav_id    = bone_ixs[ArmHandsCompressedBones.R_CLAVICLE.value]
+        l_upper_id   = bone_ixs[ArmHandsCompressedBones.L_UPPERARM.value]
+        r_upper_id   = bone_ixs[ArmHandsCompressedBones.R_UPPERARM.value]
+        l_forearm_id = bone_ixs[ArmHandsCompressedBones.L_FOREARM.value]
+        r_forearm_id = bone_ixs[ArmHandsCompressedBones.R_FOREARM.value]
+        l_hand_id    = bone_ixs[ArmHandsCompressedBones.L_HAND.value]
+        r_hand_id    = bone_ixs[ArmHandsCompressedBones.R_HAND.value]
+
+        l_twist0_id  = bone_ixs[ArmHandsCompressedBones.L_FORE_TWIST_0.value]
+        l_twist1_id  = bone_ixs[ArmHandsCompressedBones.L_FORE_TWIST_1.value]
+        r_twist0_id  = bone_ixs[ArmHandsCompressedBones.R_FORE_TWIST_0.value]
+        r_twist1_id  = bone_ixs[ArmHandsCompressedBones.R_FORE_TWIST_1.value]
+
+        neck_parent_id = bone_ixs[ArmHandsCompressedBones.NECK_PARENT.value]
+
+        clav_parent = None
+        if spine2_id is not None and spine2_id in idx_to_bone:
+            clav_parent = idx_to_bone[spine2_id]
+        elif neck_parent_id in idx_to_bone:
+            clav_parent = idx_to_bone[neck_parent_id]
+
+        if clav_parent is not None:
+            if l_clav_id in idx_to_bone:
+                idx_to_bone[l_clav_id].parent = clav_parent
+            if r_clav_id in idx_to_bone:
+                idx_to_bone[r_clav_id].parent = clav_parent
+
+        # clavicle -> upper -> forearm -> hand
+        chains = [
+            (l_clav_id,    l_upper_id),
+            (l_upper_id,   l_forearm_id),
+            (l_forearm_id, l_hand_id),
+
+            (r_clav_id,    r_upper_id),
+            (r_upper_id,   r_forearm_id),
+            (r_forearm_id, r_hand_id),
+        ]
+
+        for parent_id, child_id in chains:
+            if parent_id in idx_to_bone and child_id in idx_to_bone:
+                idx_to_bone[child_id].parent = idx_to_bone[parent_id]
+
+        # twist chains: forearm -> twist0 -> twist1
+        if l_forearm_id in idx_to_bone and l_twist0_id in idx_to_bone:
+            idx_to_bone[l_twist0_id].parent = idx_to_bone[l_forearm_id]
+        if l_twist1_id in idx_to_bone and l_twist0_id in idx_to_bone:
+            idx_to_bone[l_twist1_id].parent = idx_to_bone[l_twist0_id]
+
+        if r_forearm_id in idx_to_bone and r_twist0_id in idx_to_bone:
+            idx_to_bone[r_twist0_id].parent = idx_to_bone[r_forearm_id]
+        if r_twist1_id in idx_to_bone and r_twist0_id in idx_to_bone:
+            idx_to_bone[r_twist1_id].parent = idx_to_bone[r_twist0_id]
+      
 def apply_finger_chains(skel_data, idx_to_bone):
     for comp in skel_data.get("components", []):
         if comp.get("type_id") != NalComponentType.FiveFinger_Top2KnuckleCurl:
