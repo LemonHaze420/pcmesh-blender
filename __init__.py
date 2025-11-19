@@ -123,25 +123,6 @@ def assign_texture_to_object(texture_path, object_name, mat=0):
     else:
         print(f"Object '{object_name}' not found")
 
-bone_ids = {
-    -1: "NO_BONE",
-     0: "BONE_PS",
-     1: "BONE_S",
-     2: "BONE_S1",
-     3: "BONE_S2",
-     4: "BONE_N",
-     5: "BONE_H",           #
-     6: "BONE_LC",     #
-     7: "BONE_LU",     #
-     8: "BONE_LF",      #
-     9: "BONE_LH",         #
-    10: "BONE_RC",     #
-    11: "BONE_RU",     #
-} 
-def get_bone_name(bone_idx: int) -> str:
-    return bone_ids.get(bone_idx, f"Bone_{int(bone_idx)}")
-
-
 def create_mesh(path, mesh_data):
     # create all bones first
     armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")

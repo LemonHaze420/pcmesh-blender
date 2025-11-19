@@ -1016,7 +1016,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
                     return f'VertexData: pos = {list(self.pos)}, normal = {list(self.normal)}, uv = {list(self.uv)}, bone_indices = {list(self.bone_indices)}, bone_weights = {list(self.bone_weights)}'
 
             assert(sizeof(VertexData) == 0x40)
-        elif meshSection.m_stride == 32 or meshSection.m_stride == 12 or meshSection.m_stride == 24 or meshSection.m_stride == 60:
+        elif meshSection.m_stride == 32 or meshSection.m_stride == 12 or meshSection.m_stride == 24 or meshSection.m_stride == 60:      # @todo: 20
             class VertexData(Structure):
                 _fields_ = [
                     ("pos", c_float * 3),
