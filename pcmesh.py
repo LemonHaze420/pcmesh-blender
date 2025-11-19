@@ -1115,7 +1115,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
 
         bones_mapped = []
         if local_bones:
-            for v in local_bones:
+            for v_idx, v in enumerate(local_bones):
                 local_idxs = [int(x) for x in v["indices"]]
                 weights = [float(x) for x in v["weights"]]
                 final_idxs = []

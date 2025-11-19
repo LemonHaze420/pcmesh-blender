@@ -23,6 +23,28 @@ from os.path import isfile, isdir, join, dirname, splitext
 from .pcmesh import *
 
 created_first = False
+requested_pcmesh = ""
+skel_data = {}
+
+class OT_OpenFileBrowser(bpy.types.Operator):
+    bl_idname = "wm.open_pcskel"
+    bl_label = "Select a skeleton"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+
+    def execute(self, context):        
+        global skel_data
+        skel_data =open_pcskel(self.filepath)
+        print(f"Loaded {skel_data['header']['name']}")
+        
+        global requested_pcmesh
+        for mesh_data in read_meshfile(requested_pcmesh):
+                create_mesh(self.filepath, mesh_data)
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
 
 def create_faces_from_indices(indices, primitive_type):
     faces = []
@@ -124,6 +146,7 @@ def assign_texture_to_object(texture_path, object_name, mat=0):
         print(f"Object '{object_name}' not found")
 
 def create_mesh(path, mesh_data):
+        
     # create all bones first
     armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")
     armature_name = f"{mesh_data.name}_Armature"
@@ -133,7 +156,11 @@ def create_mesh(path, mesh_data):
     bpy.context.view_layer.objects.active = armature_object
     
     bpy.ops.object.mode_set(mode='EDIT')
-    bone_map = {}
+
+    idx_to_bone = {}      # { bone_id (int) -> edit_bone }
+    name_to_bone = {}     # { bone_name (str) -> edit_bone }
+    
+    bpy.ops.object.mode_set(mode='EDIT')
     arm = armature_object
     edit_bones = arm.data.edit_bones
     for bone_idx, mat_data in enumerate(mesh_data.bones):
@@ -144,13 +171,14 @@ def create_mesh(path, mesh_data):
         eb.tail = eb.head + (mat.to_3x3() @ Vector((-1, 0, 0))) * 0.1
         eb.roll = 0.0
         bone_map[bone_name] = eb
+
+    # collect geom
     all_vertices = []
     all_faces = []
     all_uvs = []
     all_section_bone_data = []
     vertex_offset = 0
     
-    # collect geom
     bpy.ops.object.mode_set(mode='OBJECT')
     for section in mesh_data.sections:
         verts = [Vector(v) for v in section['vertices']]
@@ -191,7 +219,7 @@ def create_mesh(path, mesh_data):
     for vertex_offset, section_bones in all_section_bone_data:
         for local_idx, bone_data in enumerate(section_bones):
             for bone_idx, weight in zip(bone_data["indices"], bone_data["weights"]):
-                bone_name = get_bone_name(bone_idx)
+                bone_name = get_bone_name(skel_data, bone_idx)
 
                 if bone_name not in obj.vertex_groups:
                     obj.vertex_groups.new(name=bone_name)
@@ -227,8 +255,12 @@ class PCMESHImporter(bpy.types.Operator):
         current_path = self.filepath
         global created_first
         created_first = False
-        for mesh_data in read_meshfile(self.filepath):
-                create_mesh(self.filepath, mesh_data)
+        
+        global requested_pcmesh
+        requested_pcmesh = self.filepath
+        
+        bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
+        
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -292,6 +324,7 @@ def menu_func_export(self, context):
     self.layout.operator(PCMESHExporter.bl_idname, text="PCMESH (.pcmesh)")
 
 def register():
+    bpy.utils.register_class(OT_OpenFileBrowser)
     bpy.utils.register_class(PCMESHImporter)
     bpy.utils.register_class(PCMESHExporter)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
@@ -303,6 +336,6 @@ def unregister():
     bpy.utils.unregister_class(PCMESHExporter)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-
+    bpy.utils.unregister_class(OT_OpenFileBrowser)
 if __name__ == "__main__":
     register()
