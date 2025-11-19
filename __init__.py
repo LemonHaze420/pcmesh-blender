@@ -32,19 +32,26 @@ class OT_OpenFileBrowser(bpy.types.Operator):
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
 
-    def execute(self, context):        
-        global skel_data
-        skel_data =open_pcskel(self.filepath)
-        print(f"Loaded {skel_data['header']['name']}")
-        
+    def execute(self, context):
         global requested_pcmesh
-        for mesh_data in read_meshfile(requested_pcmesh):
-                create_mesh(self.filepath, mesh_data)
+        import_pcmesh(requested_pcmesh, self.filepath)
         return {'FINISHED'}
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
+
+def import_pcmesh(pcmesh_path, skel_path=None):
+    global skel_data
+    skel_data = {}
+
+    if skel_path is not None:
+        skel_data = open_pcskel(skel_path)
+        print(f"Loaded {skel_data['header']['name']}")
+
+    for mesh_data in read_meshfile(pcmesh_path):
+        create_mesh(pcmesh_path, mesh_data)
+
 
 def create_faces_from_indices(indices, primitive_type):
     faces = []
@@ -158,13 +165,12 @@ def create_mesh(path, mesh_data):
     bpy.ops.object.mode_set(mode='EDIT')
 
     idx_to_bone = {}      # { bone_id (int) -> edit_bone }
-    name_to_bone = {}     # { bone_name (str) -> edit_bone }
     
     bpy.ops.object.mode_set(mode='EDIT')
     arm = armature_object
     edit_bones = arm.data.edit_bones
     
-    # ROOT
+    # ROOT for all (for now)
     root_name = "ROOT"
     if root_name in edit_bones:
         root_eb = edit_bones[root_name]
@@ -174,59 +180,58 @@ def create_mesh(path, mesh_data):
         root_eb.tail = Vector((0.0, 0.1, 0.0))
         root_eb.roll = 0.0
     
-    name_to_bone[root_name] = root_eb
-    
-    bone_map_skel = skel_data['bone_map']      # { id -> name }
-    parent_map    = skel_data['parent_map']    # { id -> parent_id }
-    
-    mesh_indices = set(range(len(mesh_data.bones)))
-    skel_indices = set(bone_map_skel.keys())
-    all_indices  = sorted(mesh_indices | skel_indices)
-    
-    for bone_idx in all_indices:
-        bone_name = get_bone_name(skel_data, bone_idx)
-    
-        eb = edit_bones.get(bone_name)
-        if eb is None:
-            eb = edit_bones.new(bone_name)
-    
-            if 0 <= bone_idx < len(mesh_data.bones):
-                mat = Matrix(mesh_data.bones[bone_idx]).transposed()
-                eb.head = mat.to_translation()
-                eb.tail = eb.head + (mat.to_3x3() @ Vector((-1, 0, 0))) * 0.1
-                eb.roll = 0.0
-            else:
-                parent_id = parent_map.get(bone_idx, -1)
-                if parent_id == -1 or parent_id is None:
-                    parent_eb = root_eb
-                else:
-                    parent_name = get_bone_name(skel_data, parent_id)
-                    parent_eb = edit_bones.get(parent_name, root_eb)
-                if parent_eb is not None:
-                    eb.head = parent_eb.tail.copy()
-                else:
-                    eb.head = Vector((0.0, 0.0, 0.0))
-    
-                eb.tail = eb.head + Vector((0.0, 0.1, 0.0))
-                eb.roll = 0.0
-    
-        idx_to_bone[bone_idx] = eb
-        name_to_bone[bone_name] = eb
-    
-    for bone_idx, eb in idx_to_bone.items():
-        parent_id = parent_map.get(bone_idx, -1)
-        if parent_id == -1 or parent_id is None:
-            eb.parent = root_eb
-        else:
-            parent_eb = idx_to_bone.get(parent_id, root_eb)
-            eb.parent = parent_eb    
+
+    if mesh_data.bones and skel_data:
+        bone_map_skel = skel_data['bone_map']      # { id -> name }
+        parent_map    = skel_data['parent_map']    # { id -> parent_id }
         
-    
-    # remapping chain
-    apply_torso_head_chains(skel_data, idx_to_bone, root_eb)
-    apply_leg_chains(skel_data, idx_to_bone)
-    apply_arm_chains(skel_data, idx_to_bone)
-    apply_finger_chains(skel_data, idx_to_bone)
+        mesh_indices = set(range(len(mesh_data.bones)))
+        skel_indices = set(bone_map_skel.keys())
+        all_indices  = sorted(mesh_indices | skel_indices)
+        
+        for bone_idx in all_indices:
+            bone_name = get_bone_name(skel_data, bone_idx)
+        
+            eb = edit_bones.get(bone_name)
+            if eb is None:
+                eb = edit_bones.new(bone_name)
+        
+                if 0 <= bone_idx < len(mesh_data.bones):
+                    mat = Matrix(mesh_data.bones[bone_idx]).transposed()
+                    eb.head = mat.to_translation()
+                    eb.tail = eb.head + (mat.to_3x3() @ Vector((-1, 0, 0))) * 0.1
+                    eb.roll = 0.0
+                else:
+                    parent_id = parent_map.get(bone_idx, -1)
+                    if parent_id == -1 or parent_id is None:
+                        parent_eb = root_eb
+                    else:
+                        parent_name = get_bone_name(skel_data, parent_id)
+                        parent_eb = edit_bones.get(parent_name, root_eb)
+                    if parent_eb is not None:
+                        eb.head = parent_eb.tail.copy()
+                    else:
+                        eb.head = Vector((0.0, 0.0, 0.0))
+        
+                    eb.tail = eb.head + Vector((0.0, 0.1, 0.0))
+                    eb.roll = 0.0
+        
+            idx_to_bone[bone_idx] = eb
+        
+        for bone_idx, eb in idx_to_bone.items():
+            parent_id = parent_map.get(bone_idx, -1)
+            if parent_id == -1 or parent_id is None:
+                eb.parent = root_eb
+            else:
+                parent_eb = idx_to_bone.get(parent_id, root_eb)
+                eb.parent = parent_eb    
+            
+        
+        # remapping chain
+        apply_torso_head_chains(skel_data, idx_to_bone, root_eb)
+        apply_leg_chains(skel_data, idx_to_bone)
+        apply_arm_chains(skel_data, idx_to_bone)
+        apply_finger_chains(skel_data, idx_to_bone)
 
 
     # collect geom
@@ -304,23 +309,29 @@ def create_mesh(path, mesh_data):
     """
     print(f"Finished importing {mesh_data.name}")
     return obj
-
+    
 class PCMESHImporter(bpy.types.Operator):
     bl_idname = "import_scene.pcmesh"
     bl_label = "Import PCMESH"
     bl_options = {'PRESET', 'UNDO'}
+
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+
     def execute(self, context):
-        current_path = self.filepath
-        global created_first
-        created_first = False
-        
         global requested_pcmesh
         requested_pcmesh = self.filepath
-        
-        bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
-        
-        return {'FINISHED'}
+
+        has_bones = False
+        for mesh_data in read_meshfile(requested_pcmesh):
+            if mesh_data.bones:
+                has_bones = True
+                break
+
+        if not has_bones:
+            import_pcmesh(requested_pcmesh, skel_path=None)
+            return {'FINISHED'}
+
+        return bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
