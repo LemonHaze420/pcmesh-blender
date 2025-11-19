@@ -1045,10 +1045,6 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
                                 resource_file.write("vn " + ("%.6f %.6f %.6f" % (vtx.normal[0], vtx.normal[1], vtx.normal[2])) + '\n')
                 resource_file.write("s off\n")
 
-
-
-        
-
         offset = meshSection.m_indices
         indices_data_t = c_short * int(meshSection.NIndices)
         indices = indices_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(indices_data_t))])

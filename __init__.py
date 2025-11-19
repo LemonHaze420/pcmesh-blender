@@ -19,7 +19,7 @@ from mathutils import Vector
 from mathutils import Matrix
 from os import listdir
 from os.path import isfile, isdir, join, dirname, splitext
-
+from .pcskel import *
 from .pcmesh import *
 
 created_first = False
@@ -163,20 +163,73 @@ def create_mesh(path, mesh_data):
     bpy.ops.object.mode_set(mode='EDIT')
     arm = armature_object
     edit_bones = arm.data.edit_bones
-    for bone_idx, mat_data in enumerate(mesh_data.bones):
-        bone_name = get_bone_name(bone_idx)
-        mat = Matrix(mat_data).transposed()
-        eb = edit_bones.new(bone_name)
-        eb.head = mat.to_translation()
-        eb.tail = eb.head + (mat.to_3x3() @ Vector((-1, 0, 0))) * 0.1
-        eb.roll = 0.0
-        bone_map[bone_name] = eb
+    
+    # ROOT
+    root_name = "ROOT"
+    if root_name in edit_bones:
+        root_eb = edit_bones[root_name]
+    else:
+        root_eb = edit_bones.new(root_name)
+        root_eb.head = Vector((0.0, 0.0, 0.0))
+        root_eb.tail = Vector((0.0, 0.1, 0.0))
+        root_eb.roll = 0.0
+    
+    name_to_bone[root_name] = root_eb
+    
+    bone_map_skel = skel_data['bone_map']      # { id -> name }
+    parent_map    = skel_data['parent_map']    # { id -> parent_id }
+    
+    mesh_indices = set(range(len(mesh_data.bones)))
+    skel_indices = set(bone_map_skel.keys())
+    all_indices  = sorted(mesh_indices | skel_indices)
+    
+    for bone_idx in all_indices:
+        bone_name = get_bone_name(skel_data, bone_idx)
+    
+        eb = edit_bones.get(bone_name)
+        if eb is None:
+            eb = edit_bones.new(bone_name)
+    
+            if 0 <= bone_idx < len(mesh_data.bones):
+                mat = Matrix(mesh_data.bones[bone_idx]).transposed()
+                eb.head = mat.to_translation()
+                eb.tail = eb.head + (mat.to_3x3() @ Vector((-1, 0, 0))) * 0.1
+                eb.roll = 0.0
+            else:
+                parent_id = parent_map.get(bone_idx, -1)
+                if parent_id == -1 or parent_id is None:
+                    parent_eb = root_eb
+                else:
+                    parent_name = get_bone_name(skel_data, parent_id)
+                    parent_eb = edit_bones.get(parent_name, root_eb)
+                if parent_eb is not None:
+                    eb.head = parent_eb.tail.copy()
+                else:
+                    eb.head = Vector((0.0, 0.0, 0.0))
+    
+                eb.tail = eb.head + Vector((0.0, 0.1, 0.0))
+                eb.roll = 0.0
+    
+        idx_to_bone[bone_idx] = eb
+        name_to_bone[bone_name] = eb
+    
+    for bone_idx, eb in idx_to_bone.items():
+        parent_id = parent_map.get(bone_idx, -1)
+        if parent_id == -1 or parent_id is None:
+            eb.parent = root_eb
+        else:
+            parent_eb = idx_to_bone.get(parent_id, root_eb)
+            eb.parent = parent_eb    
+        
+    
 
     # collect geom
     all_vertices = []
     all_faces = []
     all_uvs = []
     all_section_bone_data = []
+    section_face_ranges = []
+    section_materials = []
     vertex_offset = 0
     
     bpy.ops.object.mode_set(mode='OBJECT')
