@@ -1,4 +1,5 @@
-// LemonHaze - 2025
+// uncomment for tool
+//#define PCSKEL_STANDALONE			
 
 #include <vector>
 #include <iostream>
@@ -46,8 +47,8 @@ constexpr std::string_view component_to_string(nalComponentType e) {
 }
 
 struct tlFixedString {
-	uint32_t hash;
-	char name[28];
+	uint32_t  hash;
+	char string[28];
 };
 struct vector4 {
 	float v[4];
@@ -280,11 +281,11 @@ public:
 
 	nalSkeletonFile(std::ifstream& skel) {
 		skel.read(reinterpret_cast<char*>(&header), sizeof nalSkeletonFileHeader);
-		printf("Name: %s\nType: %s\n", header.Name.name, header.Category.name);
+		printf("Name: %s\nType: %s\n", header.Name.string, header.Category.string);
 		printf("Version: %d\n", header.Version);
 
-		if (strstr(header.Category.name, "generic")	||
-			strstr(header.Category.name, "panel")) {
+		if (strstr(header.Category.string, "generic")	||
+			strstr(header.Category.string, "panel")) {
 			return;
 		}
 
@@ -381,7 +382,7 @@ public:
 							skel.read(reinterpret_cast<char*>(nodes.data()), sizeof GenericNode * boneCount);
 
 							for (const auto& node : nodes)
-								printf("%s \t\t[ID: %d][Parent: %d]\n", node.name.name, node.iMyMatrixIx, node.iParentMatrixIx);
+								printf("%s \t\t[ID: %d][Parent: %d]\n", node.name.string, node.iMyMatrixIx, node.iParentMatrixIx);
 							break;
 						}
 						default: {
@@ -397,11 +398,13 @@ public:
 };
 
 
-int main(int argc, char ** argp)
-{
-	auto ifs = std::ifstream(argp[1], std::ios::binary);
-	if (ifs.good()) {
-		nalSkeletonFile skel (ifs);
+#if defined(PCSKEL_STANDALONE)
+	int main(int argc, char ** argp)
+	{
+		auto ifs = std::ifstream(argp[1], std::ios::binary);
+		if (ifs.good()) {
+			nalSkeletonFile skel (ifs);
+		}
+		return 0;
 	}
-	return 0;
-}
+#endif
