@@ -144,7 +144,7 @@ public:
     std::vector<nalSkeletonEntry> skeletons;
     std::vector<nalCharAnim> animations;
 
-    nalAnimFile(std::ifstream& ifs) {
+    nalAnimFile(std::ifstream& ifs, nalSkeletonFile* skel = nullptr) {
         u32 version_test = -1;
         ifs.seekg(0, std::ios::beg);
         ifs.read(reinterpret_cast<char*>(&version_test), 4);
@@ -153,10 +153,15 @@ public:
             ifs.read(reinterpret_cast<char*>(&header), sizeof nalAnimationFileHeader);
             header.Flags &= ~4u;   // mark opened
 
+            int skelIx = -1;
             for (int i = 0; i < header.num_skeletons; ++i) {
-                nalSkeletonEntry skel;
-                ifs.read(reinterpret_cast<char*>(&skel), sizeof nalSkeletonEntry);
-                skeletons.push_back(skel);
+                nalSkeletonEntry skel_entry;
+                ifs.read(reinterpret_cast<char*>(&skel_entry), sizeof nalSkeletonEntry);
+                if (skel) {
+                    if (strstr(skel_entry.name, skel->header.Name.string))
+                        skelIx = i;
+                }
+                skeletons.push_back(skel_entry);
             }
 
             if (header.FirstAnim > 0) {
@@ -170,7 +175,7 @@ public:
                     while (anim.data.header.NextAnim != 0) {
                         ifs.seekg(((int)ifs.tellg()) + anim.data.header.NextAnim - sizeof nalCharAnimData, std::ios::beg);
                         
-                        anim = nalCharAnim(ifs);
+                        anim = nalCharAnim(ifs, skelIx != -1 ? skel : nullptr);
                         if (anim.data.header.version == CHAR_ANIM)
                             animations.push_back(anim);
                     }
@@ -197,11 +202,16 @@ public:
 
                     for (size_t i = 0; i < anim.animations.size(); ++i) {
                         auto& a = anim.animations[i].data;
-                        std::cout << "  ["  << i << "] "
-                            <<  a.header.name.string
-                            << " T="        << a.header.T_scale
-                            << " loop="     << anim.animations[i].looping()
-                            << " frames="   << a.frameCount << "\n";
+
+                        std::cout
+                            << " [" << std::setw(3) << i << "] "
+                            << std::left << std::setw(36) << a.header.name.string
+                            << std::right
+                                    << " T_scale=" << std::setw(7) << std::fixed << a.header.T_scale
+                                    << " T=" << std::setw(7) << std::fixed << a.currentTime
+                                    << " loop=" << std::setw(5) << std::boolalpha << anim.animations[i].looping()
+                                    << " frames=" << std::setw(5) << a.frameCount
+                            << '\n';
                     }
                 }
                 ifs.close();
