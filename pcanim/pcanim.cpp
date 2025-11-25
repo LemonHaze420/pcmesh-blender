@@ -14,24 +14,12 @@
 #define CHAR_ANIM       65539
 #define GEN_ANIM        66048
 
-#define u32 uint32_t
-#define s32 int32_t
-
-#define u16 uint16_t
-#define s16 int16_t
-
-#define u8 uint8_t
-#define s8 int8_t
-
-
 enum CompDataFlags
 {
     HAS_TRACK_DATA = 0x1,
     HAS_PER_ANIM_DATA = 0x2,
     HAS_PER_SKEL_DATA = 0x4,
 };
-
-
 
 struct nalSkeletonEntry {
     s32 p[2];
@@ -51,7 +39,6 @@ struct nalAnimationFileHeader {
     s32 RefCount;
 };
 
-
 struct nalAnimHeader {
     s32 vtbl;                       // runtime resolved
     s32 NextAnim;                   // rel. ptr into anim (can be used as size)
@@ -59,7 +46,7 @@ struct nalAnimHeader {
     s32 unk_field;                  // runtime
     s32 version;                    // anim format version
     float animDuration;             // full anim len
-    s32   flags;                    // &1 == loop
+    s32   flags;                    // &1 == loop, &0x20000 == scene anim
     float T_scale;                  // quant scale time
 };
 
@@ -71,8 +58,8 @@ struct nalCharAnimData {
     s32 animUserData_offs;  // 44
     s32 trackData_offs;     // 48
     s32 internaloffs;       // 
-    s32 frameCount;
-    float currentTime;
+    s32 frameCount;         // total frm count
+    float currentTime;      // time2dequant
     s32 m_pCompList[10];
     s32 animTrackCount;
     s32 m_pAnimUserData[8];
@@ -81,6 +68,10 @@ struct nalCharAnimData {
 class nalCharAnim {
 public:
     nalCharAnimData data;
+
+    bool scene_anim() {
+        return data.header.flags & 0x20000;
+    }
 
     bool looping() {
         return data.header.flags & 1;
@@ -100,6 +91,8 @@ public:
 
         int animUserDataIx = 0;
         int trackIx = 0;
+
+        std::vector<int> compTracks;
 
         for (int compIx = 0; compIx < numComponents; ++compIx) {
             int flags = 0;
@@ -123,19 +116,44 @@ public:
                 ifs.seekg(trackListAbs, std::ios::beg);
                 int mask = -1;
                 ifs.read(reinterpret_cast<char*>(&mask), 4);
+                const auto pCodecIxs = (int)ifs.tellg();        // (pPerAnimData+4)
 
 
+                constexpr float const timeScaleMin = 0.0009765625;
+                
                 int num_quats = __popcnt(mask & 0x1F);
                 bool hasExtra = (mask & 0x20) != 0;
                 int num_tracks = 3 * num_quats + (hasExtra ? 6 : 0);
+
+
+                CharEntropyDecoder::CharChannelDecoder dec{};
+                dec.ptr = nullptr/*AnimTrack*/;
+                dec.bitpos = 0;
+                dec.decoder = -1;
+                dec.zeroes[0] = dec.zeroes[1] = 0;
+
+                // temps for now
+                std::vector<CharEntropyDecoder::EncTrackData> tracks(num_tracks);
+                std::fill(tracks.begin(), tracks.end(), CharEntropyDecoder::EncTrackData{ 0,0,0,0 });
+
                 printf("[%d] q=%d t=%d [extras=%s]\n", compIx, num_quats, num_tracks, hasExtra ? "true" : "false");
+                float trackCurrTimeSim = data.currentTime;
+                for (uint32_t frame = 0; frame < data.frameCount; ++frame) {
+                    float scaledQuant = timeScaleMin * trackCurrTimeSim;
+                    // @todo:
+                    // quant
+                    //  mag|entropy
+                    // applytracks -> blend
+                    trackCurrTimeSim -= 0.0333f;
+                }
             }
-        }
-
-
-        
+        }        
         ifs.seekg(b);   // @todo: remove when parser done, doing this to cleanly read all for now
     }
+
+private:
+    
+
 };
 
 class nalAnimFile {
@@ -167,7 +185,7 @@ public:
             if (header.FirstAnim > 0) {
                 ifs.seekg(header.FirstAnim, std::ios::beg);
 
-                nalCharAnim anim(ifs);
+                nalCharAnim anim(ifs, skel);
                 if (anim.data.header.version == CHAR_ANIM)
                 {
                     animations.push_back(anim);
@@ -175,7 +193,7 @@ public:
                     while (anim.data.header.NextAnim != 0) {
                         ifs.seekg(((int)ifs.tellg()) + anim.data.header.NextAnim - sizeof nalCharAnimData, std::ios::beg);
                         
-                        anim = nalCharAnim(ifs, skelIx != -1 ? skel : nullptr);
+                        anim = nalCharAnim(ifs, skel);
                         if (anim.data.header.version == CHAR_ANIM)
                             animations.push_back(anim);
                     }
@@ -185,6 +203,7 @@ public:
             header.Flags |= 8u;
         }
     }
+
 };
 
 #if defined(PCANIM_STANDALONE)
@@ -210,6 +229,7 @@ public:
                                     << " T_scale=" << std::setw(7) << std::fixed << a.header.T_scale
                                     << " T=" << std::setw(7) << std::fixed << a.currentTime
                                     << " loop=" << std::setw(5) << std::boolalpha << anim.animations[i].looping()
+                                    << " scene_anim=" << std::setw(5) << std::boolalpha << anim.animations[i].scene_anim()
                                     << " frames=" << std::setw(5) << a.frameCount
                             << '\n';
                     }
