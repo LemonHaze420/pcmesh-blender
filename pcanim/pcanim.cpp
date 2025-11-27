@@ -108,7 +108,7 @@ public:
                 ++animUserDataIx;
             }
 
-            if (flags & HAS_TRACK_DATA) {
+            if (has_track(flags)) {
                 ifs.seekg(perAnimDataOffs, std::ios::beg);              // codec
 
                 int mask = -1;
@@ -128,7 +128,6 @@ public:
                 printf("ntracks=%d\n", getNumTracks_TorsoHeadEnt(mask));
                 printf("len=%d\n", getNumBytes_TorsoHeadEnt(mask));
 
-                trackIx++;
 
                 // parsing ends here, using this for tests, but pushing so the tool still works
 #               if 0
@@ -152,6 +151,7 @@ public:
                         trackCurrTimeSim -= 0.0333f;
                     }
 #               endif
+                trackIx++;
             }
         }        
         ifs.seekg(b);   // @todo: remove when parser done, doing this to cleanly read all for now

@@ -103,6 +103,9 @@ enum CompDataFlags
 	HAS_PER_SKEL_DATA = 0x4,
 };
 
+constexpr bool has_track(uint32_t flags) {
+    return (flags & (HAS_PER_ANIM_DATA | HAS_TRACK_DATA)) == (HAS_PER_ANIM_DATA | HAS_TRACK_DATA);
+}
 
 constexpr bool get_has_extras(uint32_t mask)
 {
