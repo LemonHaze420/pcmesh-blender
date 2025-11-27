@@ -14,6 +14,8 @@
 #define CHAR_ANIM       65539
 #define GEN_ANIM        66048
 
+constexpr float const timeScaleMin = 0.0009765625;
+
 enum CompDataFlags
 {
     HAS_TRACK_DATA = 0x1,
@@ -43,7 +45,7 @@ struct nalAnimHeader {
     s32 vtbl;                       // runtime resolved
     s32 NextAnim;                   // rel. ptr into anim (can be used as size)
     tlFixedString name;             // anim name
-    s32 unk_field;                  // runtime
+    s32 skelIx;                     // runtime
     s32 version;                    // anim format version
     float animDuration;             // full anim len
     s32   flags;                    // &1 == loop, &0x20000 == scene anim
@@ -61,8 +63,8 @@ struct nalCharAnimData {
     s32 frameCount;         // total frm count
     float currentTime;      // time2dequant
     s32 m_pCompList[10];
-    s32 animTrackCount;
     s32 m_pAnimUserData[8];
+    s32 animTrackCount;     // unlikely
 };
 
 class nalCharAnim {
@@ -101,13 +103,14 @@ public:
             if ((flags & 1) == 0)
                 continue;
 
+            int absPtr = animListAbs;
             if (flags & HAS_PER_ANIM_DATA) {
                 int tableEntryOffset = animListAbs + (animUserDataIx + 1) * 4;
                 int elemOffset = 0;
                 ifs.seekg(tableEntryOffset, std::ios::beg);
                 ifs.read(reinterpret_cast<char*>(&elemOffset), 4);
 
-                int absPtr = animListAbs + elemOffset;
+                absPtr += elemOffset;
                 printf("[%d] [0x%X] @ 0x%X\n", compIx, elemOffset, absPtr);
                 ++animUserDataIx;
             }
@@ -119,15 +122,12 @@ public:
                 const auto pCodecIxs = (int)ifs.tellg();        // (pPerAnimData+4)
 
 
-                constexpr float const timeScaleMin = 0.0009765625;
-                
                 int num_quats = __popcnt(mask & 0x1F);
                 bool hasExtra = (mask & 0x20) != 0;
                 int num_tracks = 3 * num_quats + (hasExtra ? 6 : 0);
 
-
                 CharEntropyDecoder::CharChannelDecoder dec{};
-                dec.ptr = nullptr/*AnimTrack*/;
+                //dec.ptr = absPtr;
                 dec.bitpos = 0;
                 dec.decoder = -1;
                 dec.zeroes[0] = dec.zeroes[1] = 0;
@@ -167,9 +167,15 @@ public:
         ifs.seekg(0, std::ios::beg);
         ifs.read(reinterpret_cast<char*>(&version_test), 4);
         ifs.seekg(0, std::ios::beg);
+        
         if (version_test == ANIM_CONTAINER) {
             ifs.read(reinterpret_cast<char*>(&header), sizeof nalAnimationFileHeader);
             header.Flags &= ~4u;   // mark opened
+
+            auto p = ifs.tellg();
+            ifs.seekg(0, std::ios::end);
+            auto end = ifs.tellg();
+            ifs.seekg(p, std::ios::beg);
 
             int skelIx = -1;
             for (int i = 0; i < header.num_skeletons; ++i) {
@@ -226,11 +232,12 @@ public:
                             << " [" << std::setw(3) << i << "] "
                             << std::left << std::setw(36) << a.header.name.string
                             << std::right
-                                    << " T_scale=" << std::setw(7) << std::fixed << a.header.T_scale
-                                    << " T=" << std::setw(7) << std::fixed << a.currentTime
-                                    << " loop=" << std::setw(5) << std::boolalpha << anim.animations[i].looping()
-                                    << " scene_anim=" << std::setw(5) << std::boolalpha << anim.animations[i].scene_anim()
-                                    << " frames=" << std::setw(5) << a.frameCount
+                                    << " T_scale="      << std::setw(7) << std::fixed << a.header.T_scale
+                                    << " T="            << std::setw(7) << std::fixed << a.currentTime
+                                    << " loop="         << std::setw(5) << std::boolalpha << anim.animations[i].looping()
+                                    << " scene_anim="   << std::setw(5) << std::boolalpha << anim.animations[i].scene_anim()
+                                    << " frames="       << std::setw(4) << a.frameCount
+                                    << " skel="         << std::setw(5) << anim.skeletons[a.header.skelIx].name
                             << '\n';
                     }
                 }
