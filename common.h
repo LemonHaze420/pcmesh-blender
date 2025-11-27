@@ -96,6 +96,23 @@ char evaluate_lerp_params(
 
 // Components
 
+enum iComponentID {
+    iArbitraryPO,
+    igeneric,
+    iFakerootStdEnt,
+    iTorsoHeadEnt,
+    iTorsoHeadStdPose,
+    iLegsEnt,
+    iLegsIKEnt,
+    iArmsEnt,
+    iArmIKEnt,
+    iTentacleEnt,
+    iFing52KnuckEnt,
+    iFing5CurlEnt,
+    iFing5RedEnt,
+    iFing5Ent
+};
+
 enum CompDataFlags
 {
 	HAS_TRACK_DATA = 0x1,
@@ -131,7 +148,7 @@ constexpr int to_bytes(int tracks, int header_size = 0) {
 }
 
 
-// TorsoHeadEnt/StdPose
+// TorsoHeadEnt/StdPose - D:8
 
 inline int getNumTracks_TorsoHeadEnt(uint32_t mask) {
     return count(mask, 0x1Fu, 3) + count(mask, 0x20u, 6);

@@ -81,7 +81,7 @@ public:
         int animListAbs = base + data.animUserData_offs;
         int trackListAbs = base + data.trackData_offs;
 
-        constexpr const int testSkelComponents = 6;
+        constexpr const int testSkelComponents = 7;
         const int numComponents = skel ? skel->components.size() : testSkelComponents;
 
         int animUserDataIx = 0;
@@ -90,13 +90,13 @@ public:
         std::vector<int> compTracks;
 
         for (int compIx = 0; compIx < numComponents; ++compIx) {
+            int perAnimDataOffs = animListAbs;
             int flags = 0;
             ifs.seekg(compListAbs + compIx * 4, std::ios::beg);
             ifs.read(reinterpret_cast<char*>(&flags), 4);
             if ((flags & 1) == 0)
                 continue;
 
-            int perAnimDataOffs = animListAbs;
             if (flags & HAS_PER_ANIM_DATA) {
                 int tableEntryOffset = animListAbs + (animUserDataIx + 1) * 4;
                 int elemOffset = 0;
@@ -122,12 +122,25 @@ public:
                 int trackDataAbs = trackListAbs + trackOffset;          // --> bitstream
                 ifs.seekg(trackDataAbs, std::ios::beg);
 
-
-                printf("[T][%d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), get_num_tracks(mask), get_has_extras(mask) ? "true" : "false", trackDataAbs);
-                assert(getNumTracks_TorsoHeadEnt(mask) == num_tracks && "ntracks do not match");
-                printf("ntracks=%d\n", getNumTracks_TorsoHeadEnt(mask));
-                printf("len=%d\n", getNumBytes_TorsoHeadEnt(mask));
-
+                auto ntracks = get_num_tracks(mask);
+                switch ((iComponentID)compIx) {
+                    case iComponentID::iTorsoHeadStdPose: 
+                    case iComponentID::iTorsoHeadEnt: 
+                    {
+                        auto len= getNumBytes_TorsoHeadEnt(mask);
+                        printf("[T][%d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
+                        printf("ntracks=%d\n", ntracks);
+                        printf("len=%d\n", len);
+                        if (len)
+                            printf("decoded len=%d\n", 16*(ntracks+15)   );
+                        break;
+                    }
+                    default:
+                    {
+                        printf("[T][%d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
+                        break;
+                    }
+                }
 
                 // parsing ends here, using this for tests, but pushing so the tool still works
 #               if 0
