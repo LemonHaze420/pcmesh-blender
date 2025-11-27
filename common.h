@@ -22,6 +22,19 @@ struct vector3 {
 struct matrix4x4 {
 	vector4 m[4];
 };
+struct quat {
+    vector4 v;
+};
+
+quat* quat_compose(quat* q, vector3* xyz) {
+    float x, y, z;
+    x = q->v.v[0] = xyz->v[0];  
+    y = q->v.v[1] = xyz->v[1];  
+    z = q->v.v[2] = xyz->v[2];  
+    q->v.v[3] = std::sqrt(std::fabs(1.0 - (y * y + z * z + x * x)));
+    return q;
+}
+
 
 
 // General
@@ -131,7 +144,7 @@ constexpr bool get_has_extras(uint32_t mask)
 
 int get_num_quats(uint32_t mask)
 {
-    return __popcnt(mask & 0x1F);
+    return std::popcount(mask & 0x1F);
 }
 
 int get_num_tracks(uint32_t mask)
