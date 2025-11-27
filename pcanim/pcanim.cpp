@@ -142,6 +142,27 @@ public:
                     }
                 }
 
+                float outT, outBlendT;
+                unsigned int next, curr;
+                for (uint32_t frame = 0; frame < data.frameCount; ++frame) {
+                    float currFrameIndex;
+                    if (data.frameCount <= 1) {
+                        currFrameIndex = 0.0f;
+                    } else if (data.header.flags & 1) {
+                        currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount);
+                    } else {
+                        currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount - 1);
+                    }
+
+                    char loop_count = evaluate_lerp_params(data.header.flags, data.header.T_scale, data.frameCount, &outT,
+                                                                                                                    &next,
+                                                                                                                    &curr,
+                                                                                                                    &outBlendT,
+                                                                                                                    currFrameIndex);
+                    printf("%3u: loops=%d  T=%f  blend=%f  next=%u  curr=%u\n",
+                        frame, loop_count, outT, outBlendT, next, curr);
+                }
+
                 // parsing ends here, using this for tests, but pushing so the tool still works
 #               if 0
                     CharEntropyDecoder::CharChannelDecoder dec{};
