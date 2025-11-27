@@ -16,13 +16,6 @@
 
 constexpr float const timeScaleMin = 0.0009765625;
 
-enum CompDataFlags
-{
-    HAS_TRACK_DATA = 0x1,
-    HAS_PER_ANIM_DATA = 0x2,
-    HAS_PER_SKEL_DATA = 0x4,
-};
-
 struct nalSkeletonEntry {
     s32 p[2];
     s32 hash;
@@ -62,9 +55,9 @@ struct nalCharAnimData {
     s32 internaloffs;       // 
     s32 frameCount;         // total frm count
     float currentTime;      // time2dequant
-    s32 m_pCompList[10];
-    s32 m_pAnimUserData[8];
-    s32 animTrackCount;     // unlikely
+    s32 m_pCompList[10];    // 
+    s32 animTrackCount;     // 
+    s32 m_pAnimUserData[8]; // 
 };
 
 class nalCharAnim {
@@ -103,49 +96,62 @@ public:
             if ((flags & 1) == 0)
                 continue;
 
-            int absPtr = animListAbs;
+            int perAnimDataOffs = animListAbs;
             if (flags & HAS_PER_ANIM_DATA) {
                 int tableEntryOffset = animListAbs + (animUserDataIx + 1) * 4;
                 int elemOffset = 0;
                 ifs.seekg(tableEntryOffset, std::ios::beg);
                 ifs.read(reinterpret_cast<char*>(&elemOffset), 4);
 
-                absPtr += elemOffset;
-                printf("[%d] [0x%X] @ 0x%X\n", compIx, elemOffset, absPtr);
+                perAnimDataOffs += elemOffset;
+                printf("[A][%d][0x%X] 0x%X\n", compIx, elemOffset, perAnimDataOffs);
                 ++animUserDataIx;
             }
 
             if (flags & HAS_TRACK_DATA) {
-                ifs.seekg(trackListAbs, std::ios::beg);
+                ifs.seekg(perAnimDataOffs, std::ios::beg);              // codec
+
                 int mask = -1;
                 ifs.read(reinterpret_cast<char*>(&mask), 4);
-                const auto pCodecIxs = (int)ifs.tellg();        // (pPerAnimData+4)
+                
+                int trackEntryOffset = trackListAbs + (trackIx + 1) * 4;
+                ifs.seekg(trackEntryOffset, std::ios::beg);
+
+                int trackOffset = 0;
+                ifs.read(reinterpret_cast<char*>(&trackOffset), 4);
+                int trackDataAbs = trackListAbs + trackOffset;          // --> bitstream
+                ifs.seekg(trackDataAbs, std::ios::beg);
 
 
-                int num_quats = __popcnt(mask & 0x1F);
-                bool hasExtra = (mask & 0x20) != 0;
-                int num_tracks = 3 * num_quats + (hasExtra ? 6 : 0);
+                printf("[T][%d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), get_num_tracks(mask), get_has_extras(mask) ? "true" : "false", trackDataAbs);
+                assert(getNumTracks_TorsoHeadEnt(mask) == num_tracks && "ntracks do not match");
+                printf("ntracks=%d\n", getNumTracks_TorsoHeadEnt(mask));
+                printf("len=%d\n", getNumBytes_TorsoHeadEnt(mask));
 
-                CharEntropyDecoder::CharChannelDecoder dec{};
-                //dec.ptr = absPtr;
-                dec.bitpos = 0;
-                dec.decoder = -1;
-                dec.zeroes[0] = dec.zeroes[1] = 0;
+                trackIx++;
 
-                // temps for now
-                std::vector<CharEntropyDecoder::EncTrackData> tracks(num_tracks);
-                std::fill(tracks.begin(), tracks.end(), CharEntropyDecoder::EncTrackData{ 0,0,0,0 });
+                // parsing ends here, using this for tests, but pushing so the tool still works
+#               if 0
+                    CharEntropyDecoder::CharChannelDecoder dec{};
+                    //dec.ptr = trackListAbs;
+                    dec.bitpos = 0;
+                    dec.decoder = -1;
+                    dec.zeroes[0] = dec.zeroes[1] = 0;
 
-                printf("[%d] q=%d t=%d [extras=%s]\n", compIx, num_quats, num_tracks, hasExtra ? "true" : "false");
-                float trackCurrTimeSim = data.currentTime;
-                for (uint32_t frame = 0; frame < data.frameCount; ++frame) {
-                    float scaledQuant = timeScaleMin * trackCurrTimeSim;
-                    // @todo:
-                    // quant
-                    //  mag|entropy
-                    // applytracks -> blend
-                    trackCurrTimeSim -= 0.0333f;
-                }
+                    // temps for now
+                    std::vector<CharEntropyDecoder::EncTrackData> tracks(num_tracks);
+                    std::fill(tracks.begin(), tracks.end(), CharEntropyDecoder::EncTrackData{ 0,0,0,0 });
+
+                    float trackCurrTimeSim = data.currentTime;
+                    for (uint32_t frame = 0; frame < data.frameCount; ++frame) {
+                        float scaledQuant = timeScaleMin * trackCurrTimeSim;
+                        // @todo:
+                        // quant
+                        //  mag|entropy
+                        // applytracks -> blend
+                        trackCurrTimeSim -= 0.0333f;
+                    }
+#               endif
             }
         }        
         ifs.seekg(b);   // @todo: remove when parser done, doing this to cleanly read all for now
