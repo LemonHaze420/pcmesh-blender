@@ -31,7 +31,7 @@ quat* quat_compose(quat* q, vector3* xyz) {
     x = q->v.v[0] = xyz->v[0];  
     y = q->v.v[1] = xyz->v[1];  
     z = q->v.v[2] = xyz->v[2];  
-    q->v.v[3] = std::sqrt(std::fabs(1.0 - (y * y + z * z + x * x)));
+    q->v.v[3] = std::sqrt((float)std::fabs(1.0 - (y * y + z * z + x * x)));
     return q;
 }
 
@@ -260,3 +260,11 @@ inline int getNumBytes_ArbitraryPOCharComp(const uint32_t* bitfield, uint32_t to
 
     return to_bytes(total_tracks, 0x3C); // 0x3C header
 }
+
+
+// Animation
+
+enum nalAnimFlags : int32_t {
+    IS_SCENE_ANIM = 0x20000,
+    LOOPING = 1
+};

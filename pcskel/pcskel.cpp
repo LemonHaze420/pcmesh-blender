@@ -255,11 +255,6 @@ struct nalSkeletonFileHeader {
 
 };
 
-enum ComponentFlags : int32_t {
-	COMP_ENABLED = 1,
-	COMP_HAS_SKEL_DATA = 4,
-};
-
 class nalSkeletonFile {
 public:
 	nalSkeletonFileHeader header;
@@ -304,7 +299,7 @@ public:
 			if (header.numComponents) {
 				std::vector<int32_t> indices;
 				for (int i = 0; i < header.numComponents; ++i) {
-					if (components[i].flags & COMP_HAS_SKEL_DATA)
+					if (components[i].flags & HAS_PER_SKEL_DATA)
 						indices.push_back(i);
 				}
 
