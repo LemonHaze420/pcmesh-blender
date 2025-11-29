@@ -172,9 +172,6 @@ public:
                     dec.bitpos = dec.zeroes[0] = dec.zeroes[1] = 0;
                     dec.decoder = static_cast<uint8_t>(-1);
                     
-                    float outT, outBlendT;
-                    unsigned int next, curr;
-
                     std::vector<CharEntropyDecoder::EncTrackData> tracks(ntracks);
                     std::memset(tracks.data(), 0, tracks.size() * sizeof(CharEntropyDecoder::EncTrackData));
 
@@ -189,17 +186,20 @@ public:
                             currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount - 1);
                         }
 
+                        float outT, outBlendT;
+                        unsigned int next, curr;
                         char loop_count = evaluate_lerp_params(data.header.flags, data.header.T_scale, data.frameCount, &outT,
                                                                                                                         &next,
                                                                                                                         &curr,
                                                                                                                         &outBlendT,
                                                                                                                         currFrameIndex);
+
 #                       if _DEBUG
                         printf("%3u: loops=%d  T=%f  blend=%f  next=%u  curr=%u\n",
-                                frame, loop_count, outT, outBlendT, next, curr);
+                            frame, loop_count, outT, outBlendT, next, curr);
 #                       endif
-                        
-                        DecodeDequantTracks(tracks.data(), codecBytes.data(), &dec, frame, 0, ntracks, scaledQuant, scene_anim());
+
+                        IntegrateForFrame(tracks, codecBytes.data(), mask, frame, dec, ntracks, scaledQuant, scene_anim());
 
 #                       if _DEBUG
                         printf("[C%02d] frame=%3u loops=%d T=%f blend=%f next=%u curr=%u\n",
@@ -215,10 +215,9 @@ public:
 #                       endif
                     }
                 }
-
                 trackIx++;
             }
-        }        
+        }
         ifs.seekg(b);   // @todo: remove when parser done, doing this to cleanly read all for now
     }
 

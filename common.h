@@ -28,7 +28,6 @@ struct quat {
         float v[4];
     };
 
-
     void compose(vector3* xyz) {
         float x, y, z;
         x = v4.v[0] = xyz->v[0];
@@ -38,11 +37,7 @@ struct quat {
     }
 
     void norm() {
-        float x = v[0];
-        float y = v[1];
-        float z = v[2];
-        float w = v[3];
-
+        float x = v[0], y = v[1], z = v[2], w = v[3];
         float len2 = x * x + y * y + z * z + w * w;
         if (len2 > 0.0f) {
             float invLen = 1.0f / std::sqrt(len2);
@@ -52,7 +47,6 @@ struct quat {
             v[3] = w * invLen;
         }
     }
-
 };
 
 

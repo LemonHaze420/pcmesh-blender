@@ -2845,7 +2845,7 @@ namespace CharEntropyDecoder {
     };
 
 
-    void DecodeDequantTracks(
+    void DequantTracks(
         EncTrackData* tracks,
         const uint8_t* codecIxs,
         CharChannelDecoder* dec,
@@ -2897,6 +2897,194 @@ namespace CharEntropyDecoder {
                 --track->iNumZerosInTrack;
                 track->fSecDeltaValue = 0.0f;
             }
+        }
+    }
+
+
+    int32_t ReconstructBaseTracks(EncTrackData* tracks, const unsigned char*, unsigned int iFrameIx)
+    {
+
+        EncTrackData* tx = &tracks[iFrameIx];
+        EncTrackData* ty = &tracks[iFrameIx+1];
+        EncTrackData* tz = &tracks[iFrameIx+2];
+
+        vector3 base_xyz;
+        base_xyz.v[0] = tx->fWholeValue;
+        base_xyz.v[1] = ty->fWholeValue;
+        base_xyz.v[2] = tz->fWholeValue;
+
+        quat q_base;
+        q_base.compose(&base_xyz);
+
+        vector3 delta_xyz;
+        delta_xyz.v[0] = tx->fDeltaValue;
+        delta_xyz.v[1] = ty->fDeltaValue;
+        delta_xyz.v[2] = tz->fDeltaValue;
+
+        quat q_delta;
+        q_delta.compose(&delta_xyz);
+        q_delta.norm();
+
+        quat q_out;
+        {
+            const float ax = q_delta.v[0];
+            const float ay = q_delta.v[1];
+            const float az = q_delta.v[2];
+            const float aw = q_delta.v[3];
+
+            const float bx = q_base.v[0];
+            const float by = q_base.v[1];
+            const float bz = q_base.v[2];
+            const float bw = q_base.v[3];
+
+            q_out.v[0] = bw * ax + ay * bz - az * by + bx * aw;
+            q_out.v[1] = ay * bw + aw * by - bz * ax + bx * az;
+            q_out.v[2] = ax * by - ay * bx + bw * az + bz * aw;
+            q_out.v[3] = bw * aw - (ay * by + ax * bx + bz * az);
+        }
+
+
+        if (q_out.v[3] < 0.0f) {
+            q_out.v[0] = -q_out.v[0];
+            q_out.v[1] = -q_out.v[1];
+            q_out.v[2] = -q_out.v[2];
+            q_out.v[3] = -q_out.v[3];
+        }
+
+        tx->fWholeValue = q_out.v[0];
+        ty->fWholeValue = q_out.v[1];
+        tz->fWholeValue = q_out.v[2];
+
+        return *reinterpret_cast<int32_t*>(&tz->fWholeValue);
+    }
+
+
+
+    int32_t ApplyTrackDeltas(EncTrackData* tracks, const unsigned char*, unsigned int iTrackIx)
+    {
+        EncTrackData    *tx = &tracks[iTrackIx],
+                        *ty = &tracks[iTrackIx + 1],
+                        *tz = &tracks[iTrackIx + 2];
+
+        tx->fDeltaValue += tx->fSecDeltaValue;
+        ty->fDeltaValue += ty->fSecDeltaValue;
+        tz->fDeltaValue += tz->fSecDeltaValue;
+
+        vector3 base_xyz;
+        base_xyz.v[0] = tx->fWholeValue;
+        base_xyz.v[1] = ty->fWholeValue;
+        base_xyz.v[2] = tz->fWholeValue;
+
+        quat q_base;
+        q_base.compose(&base_xyz);
+
+        vector3 delta_xyz;
+        delta_xyz.v[0] = tx->fDeltaValue;
+        delta_xyz.v[1] = ty->fDeltaValue;
+        delta_xyz.v[2] = tz->fDeltaValue;
+
+        quat q_delta;
+        q_delta.compose(&delta_xyz);
+        q_delta.norm();
+
+        quat q_out;
+        {
+            const float ax = q_delta.v[0];
+            const float ay = q_delta.v[1];
+            const float az = q_delta.v[2];
+            const float aw = q_delta.v[3];
+
+            const float bx = q_base.v[0];
+            const float by = q_base.v[1];
+            const float bz = q_base.v[2];
+            const float bw = q_base.v[3];
+
+            q_out.v[0] = bw * ax + ay * bz - az * by + bx * aw;
+            q_out.v[1] = ay * bw + aw * by - bz * ax + bx * az;
+            q_out.v[2] = ax * by - ay * bx + bw * az + bz * aw;
+            q_out.v[3] = bw * aw - (ay * by + ax * bx + bz * az);
+        }
+
+        if (q_out.v[3] < 0.0f) {
+            q_out.v[0] = -q_out.v[0];
+            q_out.v[1] = -q_out.v[1];
+            q_out.v[2] = -q_out.v[2];
+            q_out.v[3] = -q_out.v[3];
+        }
+
+        tx->fWholeValue = q_out.v[0];
+        ty->fWholeValue = q_out.v[1];
+        tz->fWholeValue = q_out.v[2];
+
+        return *reinterpret_cast<int32_t*>(&tz->fWholeValue);
+    }
+
+    static void IntegrateForFrame(std::vector<EncTrackData>& tracks, const uint8_t* codecBytes, int mask, unsigned int iFrameIx, CharChannelDecoder& dec, unsigned int ntracks, float scaledQuant, bool isSceneAnim)
+    {
+        DequantTracks(tracks.data(), codecBytes, &dec, iFrameIx, 0, ntracks, scaledQuant, isSceneAnim);
+        if (iFrameIx == 0)
+            return;
+
+        if (iFrameIx == 1)
+        {
+            unsigned decodedTracks = 0;
+            for (unsigned i = 0; i < 5; ++i)
+            {
+                if (mask & (1 << i))
+                {
+                    ReconstructBaseTracks(tracks.data(), codecBytes, decodedTracks);
+                    decodedTracks += 3;
+                }
+            }
+
+            if (mask & 0x20)
+            {
+                ReconstructBaseTracks(tracks.data(), codecBytes, decodedTracks);
+
+                unsigned trackIx = decodedTracks + 3;
+                auto& t0 = tracks[trackIx++];
+                auto& t1 = tracks[trackIx];
+                auto& t2 = tracks[trackIx + 1];
+
+                t0.fWholeValue += t0.fDeltaValue;
+                t1.fWholeValue += t1.fDeltaValue;
+                t2.fWholeValue += t2.fDeltaValue;
+            }
+            return;
+        }
+
+
+        unsigned iTrackIx = 0;
+        for (unsigned j = 0; j < 5; ++j)
+        {
+            if (mask & (1 << j))
+            {
+                ApplyTrackDeltas(tracks.data(), codecBytes, iTrackIx);
+                iTrackIx += 3;
+            }
+        }
+
+        // extras
+        if (mask & 0x20)
+        {
+            ApplyTrackDeltas(tracks.data(), codecBytes, iTrackIx);
+
+            unsigned tmpTrackIx = iTrackIx + 3;
+
+            auto& t0 = tracks[tmpTrackIx++];
+            float d0 = t0.fSecDeltaValue + t0.fDeltaValue;
+            t0.fDeltaValue = d0;
+            t0.fWholeValue += d0;
+
+            auto& t1 = tracks[tmpTrackIx++];
+            float d1 = t1.fSecDeltaValue + t1.fDeltaValue;
+            t1.fDeltaValue = d1;
+            t1.fWholeValue += d1;
+
+            auto& t2 = tracks[tmpTrackIx];
+            float d2 = t2.fSecDeltaValue + t2.fDeltaValue;
+            t2.fDeltaValue = d2;
+            t2.fWholeValue += d2;
         }
     }
 }
