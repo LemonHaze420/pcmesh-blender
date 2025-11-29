@@ -2901,13 +2901,8 @@ namespace CharEntropyDecoder {
     }
 
 
-    int32_t ReconstructBaseTracks(EncTrackData* tracks, const unsigned char*, unsigned int iFrameIx)
+    static inline int32_t ApplyQuatDeltaToTracks(EncTrackData* tx, EncTrackData* ty, EncTrackData* tz)
     {
-
-        EncTrackData* tx = &tracks[iFrameIx];
-        EncTrackData* ty = &tracks[iFrameIx+1];
-        EncTrackData* tz = &tracks[iFrameIx+2];
-
         vector3 base_xyz;
         base_xyz.v[0] = tx->fWholeValue;
         base_xyz.v[1] = ty->fWholeValue;
@@ -2925,25 +2920,7 @@ namespace CharEntropyDecoder {
         q_delta.compose(&delta_xyz);
         q_delta.norm();
 
-        quat q_out;
-        {
-            const float ax = q_delta.v[0];
-            const float ay = q_delta.v[1];
-            const float az = q_delta.v[2];
-            const float aw = q_delta.v[3];
-
-            const float bx = q_base.v[0];
-            const float by = q_base.v[1];
-            const float bz = q_base.v[2];
-            const float bw = q_base.v[3];
-
-            q_out.v[0] = bw * ax + ay * bz - az * by + bx * aw;
-            q_out.v[1] = ay * bw + aw * by - bz * ax + bx * az;
-            q_out.v[2] = ax * by - ay * bx + bw * az + bz * aw;
-            q_out.v[3] = bw * aw - (ay * by + ax * bx + bz * az);
-        }
-
-
+        quat q_out = quat::mul(q_delta, q_base);
         if (q_out.v[3] < 0.0f) {
             q_out.v[0] = -q_out.v[0];
             q_out.v[1] = -q_out.v[1];
@@ -2958,65 +2935,26 @@ namespace CharEntropyDecoder {
         return *reinterpret_cast<int32_t*>(&tz->fWholeValue);
     }
 
+    int32_t ReconstructBaseTracks(EncTrackData* tracks, const unsigned char*, unsigned int iFrameIx)
+    {
+        EncTrackData* tx = &tracks[iFrameIx];
+        EncTrackData* ty = &tracks[iFrameIx + 1];
+        EncTrackData* tz = &tracks[iFrameIx + 2];
 
+        return ApplyQuatDeltaToTracks(tx, ty, tz);
+    }
 
     int32_t ApplyTrackDeltas(EncTrackData* tracks, const unsigned char*, unsigned int iTrackIx)
     {
-        EncTrackData    *tx = &tracks[iTrackIx],
-                        *ty = &tracks[iTrackIx + 1],
-                        *tz = &tracks[iTrackIx + 2];
+        EncTrackData* tx = &tracks[iTrackIx];
+        EncTrackData* ty = &tracks[iTrackIx + 1];
+        EncTrackData* tz = &tracks[iTrackIx + 2];
 
         tx->fDeltaValue += tx->fSecDeltaValue;
         ty->fDeltaValue += ty->fSecDeltaValue;
         tz->fDeltaValue += tz->fSecDeltaValue;
 
-        vector3 base_xyz;
-        base_xyz.v[0] = tx->fWholeValue;
-        base_xyz.v[1] = ty->fWholeValue;
-        base_xyz.v[2] = tz->fWholeValue;
-
-        quat q_base;
-        q_base.compose(&base_xyz);
-
-        vector3 delta_xyz;
-        delta_xyz.v[0] = tx->fDeltaValue;
-        delta_xyz.v[1] = ty->fDeltaValue;
-        delta_xyz.v[2] = tz->fDeltaValue;
-
-        quat q_delta;
-        q_delta.compose(&delta_xyz);
-        q_delta.norm();
-
-        quat q_out;
-        {
-            const float ax = q_delta.v[0];
-            const float ay = q_delta.v[1];
-            const float az = q_delta.v[2];
-            const float aw = q_delta.v[3];
-
-            const float bx = q_base.v[0];
-            const float by = q_base.v[1];
-            const float bz = q_base.v[2];
-            const float bw = q_base.v[3];
-
-            q_out.v[0] = bw * ax + ay * bz - az * by + bx * aw;
-            q_out.v[1] = ay * bw + aw * by - bz * ax + bx * az;
-            q_out.v[2] = ax * by - ay * bx + bw * az + bz * aw;
-            q_out.v[3] = bw * aw - (ay * by + ax * bx + bz * az);
-        }
-
-        if (q_out.v[3] < 0.0f) {
-            q_out.v[0] = -q_out.v[0];
-            q_out.v[1] = -q_out.v[1];
-            q_out.v[2] = -q_out.v[2];
-            q_out.v[3] = -q_out.v[3];
-        }
-
-        tx->fWholeValue = q_out.v[0];
-        ty->fWholeValue = q_out.v[1];
-        tz->fWholeValue = q_out.v[2];
-
-        return *reinterpret_cast<int32_t*>(&tz->fWholeValue);
+        return ApplyQuatDeltaToTracks(tx, ty, tz);
     }
 
     static void IntegrateForFrame(std::vector<EncTrackData>& tracks, const uint8_t* codecBytes, int mask, unsigned int iFrameIx, CharChannelDecoder& dec, unsigned int ntracks, float scaledQuant, bool isSceneAnim)

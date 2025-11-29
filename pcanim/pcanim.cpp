@@ -21,15 +21,15 @@ struct nalSkeletonEntry {
 };
 
 struct nalAnimationFileHeader {
-    u32 Version;
-    u32 Flags;
-    s32 SizeStringTable;
-    s32 num_skeletons;
-    tlFixedString Name;
-    s32 NumAnims;
-    u32 FirstAnim;
-    s32 FileBuf;
-    s32 RefCount;
+    u32 Version;                    // 
+    u32 Flags;                      // 
+    s32 SizeStringTable;            // 
+    s32 num_skeletons;              // 
+    tlFixedString Name;             // 
+    s32 NumAnims;                   //
+    u32 FirstAnim;                  // rel. offs into first anim
+    s32 FileBuf;                    // runtime
+    s32 RefCount;                   // runtime - current refs
 };
 
 struct nalAnimHeader {
@@ -46,8 +46,8 @@ struct nalAnimHeader {
 struct nalCharAnimData {
     nalAnimHeader header;
 
-    s32 instanceCount;      // runtime
-    s32 compList_offs;      // 40        
+    s32 instanceCount;      // runtime - current instance count
+    s32 compList_offs;      //         
     s32 animUserData_offs;  // 44
     s32 trackData_offs;     // 48
     s32 internaloffs;       // 
