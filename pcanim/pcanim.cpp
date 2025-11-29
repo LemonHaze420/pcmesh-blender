@@ -70,6 +70,11 @@ public:
         return data.header.flags & LOOPING;
     }
 
+    bool validate_version()
+    {
+        return data.header.version == CHAR_ANIM;
+    }
+
     nalCharAnim(std::ifstream& ifs, nalSkeletonFile* skel = nullptr) {
         auto base = (int)ifs.tellg();
         ifs.read(reinterpret_cast<char*>(&data), sizeof nalCharAnimData);
@@ -121,8 +126,7 @@ public:
 
                 int trackOffset = 0;
                 ifs.read(reinterpret_cast<char*>(&trackOffset), 4);
-                int trackDataAbs = trackListAbs + trackOffset;          // --> bitstream
-                //ifs.seekg(trackDataAbs, std::ios::beg);
+                int trackDataAbs = trackListAbs + trackOffset;
 
                 auto ntracks = get_num_tracks(mask), len = -1;
                 auto nquats = get_num_quats(mask);
@@ -259,7 +263,7 @@ public:
                 ifs.seekg(header.FirstAnim, std::ios::beg);
 
                 nalCharAnim anim(ifs, skel);
-                if (anim.data.header.version == CHAR_ANIM)
+                if (anim.validate_version())
                 {
                     animations.push_back(anim);
 
@@ -267,7 +271,7 @@ public:
                         ifs.seekg(((int)ifs.tellg()) + anim.data.header.NextAnim - sizeof nalCharAnimData, std::ios::beg);
                         
                         anim = nalCharAnim(ifs, skel);
-                        if (anim.data.header.version == CHAR_ANIM)
+                        if (anim.validate_version())
                             animations.push_back(anim);
                     }
                 }
@@ -276,7 +280,6 @@ public:
             header.Flags |= 8u;
         }
     }
-
 };
 
 #if defined(PCANIM_STANDALONE)

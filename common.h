@@ -23,17 +23,38 @@ struct matrix4x4 {
 	vector4 m[4];
 };
 struct quat {
-    vector4 v;
+    union {
+        vector4 v4;
+        float v[4];
+    };
+
+
+    void compose(vector3* xyz) {
+        float x, y, z;
+        x = v4.v[0] = xyz->v[0];
+        y = v4.v[1] = xyz->v[1];
+        z = v4.v[2] = xyz->v[2];
+        v4.v[3] = std::sqrt((float)std::fabs(1.0 - (y * y + z * z + x * x)));
+    }
+
+    void norm() {
+        float x = v[0];
+        float y = v[1];
+        float z = v[2];
+        float w = v[3];
+
+        float len2 = x * x + y * y + z * z + w * w;
+        if (len2 > 0.0f) {
+            float invLen = 1.0f / std::sqrt(len2);
+            v[0] = x * invLen;
+            v[1] = y * invLen;
+            v[2] = z * invLen;
+            v[3] = w * invLen;
+        }
+    }
+
 };
 
-quat* quat_compose(quat* q, vector3* xyz) {
-    float x, y, z;
-    x = q->v.v[0] = xyz->v[0];  
-    y = q->v.v[1] = xyz->v[1];  
-    z = q->v.v[2] = xyz->v[2];  
-    q->v.v[3] = std::sqrt((float)std::fabs(1.0 - (y * y + z * z + x * x)));
-    return q;
-}
 
 
 
