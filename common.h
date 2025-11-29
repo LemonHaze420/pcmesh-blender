@@ -47,6 +47,25 @@ struct quat {
             v[3] = w * invLen;
         }
     }
+    static quat mul(const quat& q_delta, const quat& q_base) {
+        quat q_out;
+
+        const float ax = q_delta.v[0];
+        const float ay = q_delta.v[1];
+        const float az = q_delta.v[2];
+        const float aw = q_delta.v[3];
+
+        const float bx = q_base.v[0];
+        const float by = q_base.v[1];
+        const float bz = q_base.v[2];
+        const float bw = q_base.v[3];
+
+        q_out.v[0] = bw * ax + ay * bz - az * by + bx * aw;
+        q_out.v[1] = ay * bw + aw * by - bz * ax + bx * az;
+        q_out.v[2] = ax * by - ay * bx + bw * az + bz * aw;
+        q_out.v[3] = bw * aw - (ay * by + ax * bx + bz * az);
+        return q_out;
+    }
 };
 
 
