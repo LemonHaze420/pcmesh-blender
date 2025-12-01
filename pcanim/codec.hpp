@@ -1,12 +1,18 @@
 #pragma once
 #include "../common.h"
 
-
 namespace CharEntropyDecoder {
     float g_fEntropyBaseQuantStep = 0.25;
     float g_fDequantScale = 0.0009765625;
     int g_iInitialValuesBitTable[4] = { 2, 4, 7, 20 };
     int g_iSceneAnimInitialValuesBitTable[4] = { 4, 7, 12, 30 };
+
+    struct EncTrackData {
+        float    fWholeValue;
+        float    fDeltaValue;
+        float    fSecDeltaValue;
+        uint32_t iNumZerosInTrack;
+    };
 
     struct CharChannelDecoder
     {
@@ -14,7 +20,17 @@ namespace CharEntropyDecoder {
         uint8_t bitpos;
         uint8_t decoder;
         uint8_t zeroes[2];
+
+        inline float GetScaledTime(float time) { return g_fDequantScale * time; }
+
+        CharChannelDecoder(uint8_t* ptr, std::vector<CharEntropyDecoder::EncTrackData>& tracks) {
+            this->ptr = ptr;
+            bitpos = zeroes[0] = zeroes[1] = 0;
+            decoder = static_cast<uint8_t>(-1);
+            std::memset(tracks.data(), 0, tracks.size() * sizeof(CharEntropyDecoder::EncTrackData));
+        }
     };
+
 
     int ReadSignedBits(CharChannelDecoder* dec, unsigned int n31)
     {
@@ -31,13 +47,6 @@ namespace CharEntropyDecoder {
         return neg ? -(int)value : (int)value;
     }
 
-    struct EncTrackData {
-        float    fWholeValue;
-        float    fDeltaValue;
-        float    fSecDeltaValue;
-        uint32_t iNumZerosInTrack;
-    };
-    
     bool IsZeroEncType(u8 i) {
         return i == 0;
     }
@@ -2845,6 +2854,7 @@ namespace CharEntropyDecoder {
     };
 
 
+
     void DequantTracks(
         EncTrackData* tracks,
         const uint8_t* codecIxs,
@@ -2957,8 +2967,9 @@ namespace CharEntropyDecoder {
         return ApplyQuatDeltaToTracks(tx, ty, tz);
     }
 
-    static void IntegrateForFrame(std::vector<EncTrackData>& tracks, const uint8_t* codecBytes, int mask, unsigned int iFrameIx, CharChannelDecoder& dec, unsigned int ntracks, float scaledQuant, bool isSceneAnim)
+    static void IntegrateForFrame(std::vector<EncTrackData>& tracks, const uint8_t* codecBytes, int mask, unsigned int iFrameIx, CharChannelDecoder& dec, unsigned int ntracks, float time, bool isSceneAnim)
     {
+        const float scaledQuant = dec.GetScaledTime(time);
         DequantTracks(tracks.data(), codecBytes, &dec, iFrameIx, 0, ntracks, scaledQuant, isSceneAnim);
         if (iFrameIx == 0)
             return;
@@ -3023,6 +3034,37 @@ namespace CharEntropyDecoder {
             float d2 = t2.fSecDeltaValue + t2.fDeltaValue;
             t2.fDeltaValue = d2;
             t2.fWholeValue += d2;
+        }
+    }
+
+
+
+    /*
+      [compIx]
+      [frameIx]
+      | X |
+      | Y |
+      | Z |
+      | W |
+      |...|
+    */
+    struct TrackData {
+        int compIx;
+        int frameIx;
+        std::vector<float> track;
+    };
+    static inline void DecomposeTrack(TrackData& track, std::vector<EncTrackData>& tracks, int compIx, int frame, int ntracks)
+    {
+        track.compIx = compIx;
+        track.frameIx = frame;
+        track.track.clear();
+        for (int t = 0; t < ntracks; ++t) {
+            track.track.push_back(tracks[t].fWholeValue);
+            printf("[C%02d][%d/%d] zeros=%d whole=%f delta=%f secDelta=%f\n", compIx, t + 1, ntracks,
+                                                                                             tracks[t].iNumZerosInTrack,
+                                                                                             tracks[t].fWholeValue,
+                                                                                             tracks[t].fDeltaValue,
+                                                                                             tracks[t].fSecDeltaValue);
         }
     }
 }

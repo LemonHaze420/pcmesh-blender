@@ -101,7 +101,6 @@ public:
                 continue;
 
             int poseIx = compIx;
-
             if (flags & HAS_PER_ANIM_DATA) {
                 int tableEntryOffset = animListAbs + (animUserDataIx + 1) * 4;
                 int elemOffset = 0;
@@ -109,7 +108,7 @@ public:
                 ifs.read(reinterpret_cast<char*>(&elemOffset), 4);
 
                 perAnimDataOffs += elemOffset;
-                printf("[A][%d][0x%X] 0x%X\n", compIx, elemOffset, perAnimDataOffs);
+                printf("[A][C%02d][0x%X] 0x%X\n", compIx, elemOffset, perAnimDataOffs);
                 ++animUserDataIx;
             }
 
@@ -130,27 +129,32 @@ public:
 
                 auto ntracks = get_num_tracks(mask), len = -1;
                 auto nquats = get_num_quats(mask);
-
                 switch ((iComponentID)compIx) {
-                    case iComponentID::iTorsoHeadStdPose: 
-                    case iComponentID::iTorsoHeadEnt: 
+                    case iComponentID::iTorsoHeadStdPose:
+                    case iComponentID::iTorsoHeadEnt:
                     {
-                        len= getNumBytes_TorsoHeadEnt(mask);
-                        printf("[T][%d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, nquats, ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
+                        len = getNumBytes_TorsoHeadEnt(mask);
+                        printf("[T][C%02d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, nquats, ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
                         printf("ntracks=%d\n", ntracks);
                         printf("len=%d\n", len);
                         if (len)
-                            printf("decoded len=%d\n", 16*(ntracks+15)   );
+                            printf("decoded len=%d\n", 16 * (ntracks + 15));
+                        break;
+                    }
+                    case iComponentID::iLegsEnt:
+                    {
+                        len = getNumBytes_StandardLegsFeet(mask);
+                        printf("[T][C%02d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
                         break;
                     }
                     default:
                     {
-                        printf("[T][%d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
-                        break;
+                        printf("[T][C%02d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
+                        continue;
                     }
                 }
 
-                if (len != -1 && nquats >0) 
+                if (len != -1 && nquats > 0)
                 {
                     std::vector<uint8_t> codecBytes(ntracks);
                     {
@@ -167,63 +171,71 @@ public:
                         ifs.seekg(savedPos, std::ios::beg);
                     }
 
-                    CharEntropyDecoder::CharChannelDecoder dec{};
-                    dec.ptr = encoded_data.data();
-                    dec.bitpos = dec.zeroes[0] = dec.zeroes[1] = 0;
-                    dec.decoder = static_cast<uint8_t>(-1);
-                    
                     std::vector<CharEntropyDecoder::EncTrackData> tracks(ntracks);
-                    std::memset(tracks.data(), 0, tracks.size() * sizeof(CharEntropyDecoder::EncTrackData));
+                    CharEntropyDecoder::CharChannelDecoder decoder(encoded_data.data(), tracks);
 
-                    const float scaledQuant = CharEntropyDecoder::g_fDequantScale * data.currentTime;
                     for (uint32_t frame = 0; frame < data.frameCount; ++frame) {
-                        float currFrameIndex;
-                        if (data.frameCount <= 1) {
-                            currFrameIndex = 0.0f;
-                        } else if (data.header.flags & 1) {
-                            currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount);
-                        } else {
-                            currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount - 1);
+                        debug_evaluate(frame);
+
+                        IntegrateForFrame(tracks, codecBytes.data(), mask, frame, decoder, ntracks, data.currentTime, scene_anim());
+                        
+                        CharEntropyDecoder::TrackData track;
+                        DecomposeTrack(track, tracks, compIx, frame, ntracks);
+                        decoded_tracks.push_back(track);
+
+                        #if _DEBUG
+                        for (int q = 0; q < nquats; ++q) {
+                            int base = 3 * q;
+                            printf("[%s] x=%f y=%f z=%f\n", compIx != iLegsEnt ? magic_enum::enum_name(magic_enum::enum_cast<TorsoHeadTracks>(q).value()).data() : magic_enum::enum_name(magic_enum::enum_cast<LegsTracks>(q).value()).data(),
+                                                            tracks[base].fWholeValue,
+                                                            tracks[base + 1].fWholeValue,
+                                                            tracks[base + 2].fWholeValue);
                         }
-
-                        float outT, outBlendT;
-                        unsigned int next, curr;
-                        char loop_count = evaluate_lerp_params(data.header.flags, data.header.T_scale, data.frameCount, &outT,
-                                                                                                                        &next,
-                                                                                                                        &curr,
-                                                                                                                        &outBlendT,
-                                                                                                                        currFrameIndex);
-
-#                       if _DEBUG
-                        printf("%3u: loops=%d  T=%f  blend=%f  next=%u  curr=%u\n",
-                            frame, loop_count, outT, outBlendT, next, curr);
-#                       endif
-
-                        IntegrateForFrame(tracks, codecBytes.data(), mask, frame, dec, ntracks, scaledQuant, scene_anim());
-
-#                       if _DEBUG
-                        printf("[C%02d] frame=%3u loops=%d T=%f blend=%f next=%u curr=%u\n",
-                            compIx, frame, loop_count, outT, outBlendT, next, curr);
-                        for (int t = 0; t < std::min(ntracks, 3); ++t) {
-                            printf("  trk %2d: zeros=%d whole=%f delta=%f secDelta=%f\n",
-                                t,
-                                tracks[t].iNumZerosInTrack,
-                                tracks[t].fWholeValue,
-                                tracks[t].fDeltaValue,
-                                tracks[t].fSecDeltaValue);
+                        if (get_has_extras(mask)) {
+                            int base = 3 * nquats;
+                            for (int e = 0; e < 6; ++e) {
+                                printf("[C%02d][E%d] v=%f\n", compIx, e, tracks[base + e].fWholeValue);
+                            }
                         }
-#                       endif
+                        #endif
                     }
                 }
-                trackIx++;
+                trackIx++;          // @todo: just for now same as below, only increment if we match this component & apply
             }
         }
-        ifs.seekg(b);   // @todo: remove when parser done, doing this to cleanly read all for now
+        ifs.seekg(b);               // doing this to cleanly read all for now
     }
 
 private:
-    
+    std::vector<CharEntropyDecoder::TrackData> decoded_tracks;
 
+    char debug_evaluate(uint32_t frame)
+    {
+        // probably not gonna need this
+#if _DEBUG
+        float currFrameIndex;
+        if (data.frameCount <= 1) {
+            currFrameIndex = 0.0f;
+        }
+        else if (looping()) {
+            currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount);
+        }
+        else {
+            currFrameIndex = static_cast<float>(frame) / static_cast<float>(data.frameCount - 1);
+        }
+
+        float outT, outBlendT;
+        unsigned int next, curr;
+        char loop_count = evaluate_lerp_params(data.header.flags, data.header.T_scale, data.frameCount, &outT,
+            &next,
+            &curr,
+            &outBlendT,
+            currFrameIndex);
+        return loop_count;
+#else
+        return 0;
+#endif
+    }
 };
 
 class nalAnimFile {
@@ -311,6 +323,7 @@ public:
                     }
                 }
                 ifs.close();
+
             }
         };
         if (!std::filesystem::is_directory(path))

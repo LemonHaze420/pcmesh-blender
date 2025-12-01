@@ -153,7 +153,7 @@ enum iComponentID {
     iFakerootStdEnt,
     iTorsoHeadEnt,
     iTorsoHeadStdPose,
-    iLegsEnt,
+    iLegsEnt			= 5,
     iLegsIKEnt,
     iArmsEnt,
     iArmIKEnt,
