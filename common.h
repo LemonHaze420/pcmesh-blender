@@ -138,6 +138,10 @@ char evaluate_lerp_params(
     }
 
     *out_next_idx = next_idx;
+
+
+	printf("loops=%d  T=%f  blend=%f  next=%u  curr=%u\n", loop_count, outT, outBlendT, next_idx, *out_curr_idx);
+
     return loop_count;
 }
 

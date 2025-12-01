@@ -136,6 +136,16 @@ struct IKSkelData {
 };
 
 
+enum TorsoHeadTracks : uint32_t {
+	TRACK_SPINE_QUAT = 0,
+	TRACK_SPINE1_QUAT = 1,
+	TRACK_SPINE2_QUAT = 2,
+	TRACK_NECK_QUAT = 3,
+	TRACK_HEAD_QUAT = 4,
+	TRACK_PELVIS_QUAT = 5,
+	NUM_QUAT_TRACKS = 5,
+};
+
 enum TorsoHeadBones : uint32_t {
 	TORSO_BONE_PELVIS = 0,
 	TORSO_BONE_SPINE = 1,
@@ -157,6 +167,14 @@ struct TorsoHeadBlock {
 	uint32_t otherMatrixIxs[1];
 };
 
+enum LegsTracks : uint32_t {
+	TRACK_L_TOE_QUAT = 0,
+	TRACK_R_TOE_QUAT = 1,
+	TRACK_L_FOOT = 2,
+	TRACK_R_FOOT = 3,
+	NUM_TOTAL_TRACKS = 4,
+	NUM_LEG_TRACKS = 2
+};
 enum LegsBones : uint32_t {
 	LEGS_BONE_L_TOE = 0,
 	LEGS_BONE_R_TOE = 1,
