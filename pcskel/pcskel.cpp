@@ -1,7 +1,11 @@
 // uncomment for tool
-//#define PCSKEL_STANDALONE			
+#ifndef PCANIM_STANDALONE			
+#define PCSKEL_STANDALONE			
+#endif
 
 #include <vector>
+#include <variant>
+#include <span>
 #include <iostream>
 #include <fstream>
 #include <ostream>
@@ -9,103 +13,7 @@
 #include "../common.h"
 #include <magic_enum.hpp>
 
-enum class nalComponentType : uint32_t
-{
-    ArbitraryPO = 0xC5E45DCF,
-    Generic = 0xEC4755BD,
-    FakerootEntropyCompressed = 0xB916E121,
-    TorsoHead_TwoNeck_Compressed = 0x7E916D6A,  // done
-    TorsoHead_OneNeck_Compressed = 0x70EA5DF2,  // done
-    LegsFeet_Compressed = 0x47CBEBDB,
-    LegsFeet_IK_Compressed = 0xA556994F,  // done
-    ArmsHands_Compressed = 0xE01F4F4D,  // done
-    ArmsHands_IK_Compressed = 0xF0AD5C8E,  // untested
-    Tentacles_Compressed = 0x464A04D8,
-    FiveFinger_Top2KnuckleCurl = 0xE7D9A8D3,
-    FiveFinger_IndividualCurl = 0xE7A8F925,
-    FiveFinger_ReducedAngular = 0xE78254B9,
-    FiveFinger_FullRotational = 0xAFEB6A28
-};
-constexpr std::string_view component_to_string(nalComponentType e) {
-	switch (e) {
-		case nalComponentType::ArbitraryPO:                 return "ArbitraryPO";
-		case nalComponentType::Generic:                     return "Generic";
-		case nalComponentType::FakerootEntropyCompressed:   return "Fakeroot Entropy Compressed";
-		case nalComponentType::TorsoHead_TwoNeck_Compressed:return "TorsoHead TwoNeck Entropy Compressed";
-		case nalComponentType::TorsoHead_OneNeck_Compressed:return "TorsoHead OneNeck Entropy Compressed";
-		case nalComponentType::LegsFeet_Compressed:         return "Legs&Feet Entropy Compressed";
-		case nalComponentType::LegsFeet_IK_Compressed:      return "Legs&Feet IK Entropy Compressed";
-		case nalComponentType::ArmsHands_Compressed:        return "Arms&Hands Entropy Compressed";
-		case nalComponentType::ArmsHands_IK_Compressed:     return "Arms&Hands IK Entropy Compressed";
-		case nalComponentType::Tentacles_Compressed:        return "Tentacles Compressed";
-		case nalComponentType::FiveFinger_Top2KnuckleCurl:  return "Five Finger Top 2 Knuckle Curl Entropy Compressed";
-		case nalComponentType::FiveFinger_IndividualCurl:   return "Five Finger Individual Finger Curl Entropy Compressed";
-		case nalComponentType::FiveFinger_ReducedAngular:   return "Five Finger Reduced-size Angular Entropy Compressed";
-		case nalComponentType::FiveFinger_FullRotational:   return "Five Finger Full-Rotational Entropy Compressed";
-		default:                                  return "Unknown type";
-	}
-}
 
-
-struct Fing5ReducedPose_PerSkelData {
-	vector3 offsetLocs[30];
-	int32_t boneIxs[30];
-	uint32_t otherMatrixIxs[2];
-};
-
-// perSkelData block offsets
-enum FingerBones {
-	FINGERS_BONE_L_FINGER_0 = 0,
-	FINGERS_BONE_R_FINGER_0 = 1,
-	FINGERS_BONE_L_FINGER_1 = 2,
-	FINGERS_BONE_L_FINGER_2 = 3,
-	FINGERS_BONE_L_FINGER_3 = 4,
-	FINGERS_BONE_L_FINGER_4 = 5,
-	FINGERS_BONE_R_FINGER_1 = 6,
-	FINGERS_BONE_R_FINGER_2 = 7,
-	FINGERS_BONE_R_FINGER_3 = 8,
-	FINGERS_BONE_R_FINGER_4 = 9,
-	FINGERS_BONE_L_FINGER_01 = 10,
-	FINGERS_BONE_R_FINGER_01 = 11,
-	FINGERS_BONE_L_FINGER_11 = 12,
-	FINGERS_BONE_L_FINGER_21 = 13,
-	FINGERS_BONE_L_FINGER_31 = 14,
-	FINGERS_BONE_L_FINGER_41 = 15,
-	FINGERS_BONE_R_FINGER_11 = 16,
-	FINGERS_BONE_R_FINGER_21 = 17,
-	FINGERS_BONE_R_FINGER_31 = 18,
-	FINGERS_BONE_R_FINGER_41 = 19,
-	FINGERS_BONE_L_FINGER_02 = 20,
-	FINGERS_BONE_R_FINGER_02 = 21,
-	FINGERS_BONE_L_FINGER_12 = 22,
-	FINGERS_BONE_L_FINGER_22 = 23,
-	FINGERS_BONE_L_FINGER_32 = 24,
-	FINGERS_BONE_L_FINGER_42 = 25,
-	FINGERS_BONE_R_FINGER_12 = 26,
-	FINGERS_BONE_R_FINGER_22 = 27,
-	FINGERS_BONE_R_FINGER_32 = 28,
-	FINGERS_BONE_R_FINGER_42 = 29,
-	FINGERS_NUM_BONE_MATRICES = 30,
-	FINGERS_BONE_L_HAND_PARENT = 30,
-	FINGERS_BONE_R_HAND_PARENT = 31,
-	FINGERS_NUM_TOTAL_MATRICES = 32,
-	FINGERS_NUM_EXTRA_MATRICES = 2
-};
-
-struct IKLegsCompressed {
-	vector4 v[9];
-	uint32_t boneidx[9];
-};
-struct ArmsHandsCompressed {
-	vector4 v[9];
-	uint32_t boneidx[16];
-};
-struct FiveFinger_Top2KnuckleCurl {
-	vector4 v[22];
-	float aa[2];
-	uint32_t boneidx[32];
-
-};
 struct ArbitraryPO {
 	uint32_t boneCount;
 	uint32_t unkCount;
@@ -126,138 +34,12 @@ struct GenericNode {
 	int32_t unk2;
 };
 
-struct IKSkelData {
-	float fUpperIKc;
-	float fUpperIKInvc;
-	float fLowerIKc;
-	float fLowerIKInvc;
-	float fUpperArmLength;
-	float fLowerArmLength;
-};
-
-
-enum TorsoHeadTracks : uint32_t {
-	TRACK_SPINE_QUAT = 0,
-	TRACK_SPINE1_QUAT = 1,
-	TRACK_SPINE2_QUAT = 2,
-	TRACK_NECK_QUAT = 3,
-	TRACK_HEAD_QUAT = 4,
-	TRACK_PELVIS_QUAT = 5,
-	NUM_QUAT_TRACKS = 5,
-};
-
-enum TorsoHeadBones : uint32_t {
-	TORSO_BONE_PELVIS = 0,
-	TORSO_BONE_SPINE = 1,
-	TORSO_BONE_SPINE1 = 2,
-	TORSO_BONE_SPINE2 = 3,
-	TORSO_BONE_NECK = 4,
-	TORSO_BONE_HEAD = 5,
-	TORSO_BONE_NECK_AUX = 6,
-
-	TORSO_NUM_BONE_MATRICES = 6,
-	TORSO_NUM_TOTAL_MATRICES = 7,
-	TORSO_NUM_EXTRA_MATRICES = 1
-};
-struct TorsoHeadBlock {
-	vector4 emptyNeckOrient;
-	vector3 emptyNeckPos;
-	vector3 offsetLocs[5];
-	uint32_t boneIxs[6];         // TorsoHeadBones
-	uint32_t otherMatrixIxs[1];
-};
-
-enum LegsTracks : uint32_t {
-	TRACK_L_TOE_QUAT = 0,
-	TRACK_R_TOE_QUAT = 1,
-	TRACK_L_FOOT = 2,
-	TRACK_R_FOOT = 3,
-	NUM_TOTAL_TRACKS = 4,
-	NUM_LEG_TRACKS = 2
-};
-enum LegsBones : uint32_t {
-	LEGS_BONE_L_TOE = 0,
-	LEGS_BONE_R_TOE = 1,
-	LEGS_BONE_L_FOOT = 2,
-	LEGS_BONE_R_FOOT = 3,
-	LEGS_BONE_L_THIGH = 4,
-	LEGS_BONE_L_CALF = 5,
-	LEGS_BONE_R_THIGH = 6,
-	LEGS_BONE_R_CALF = 7,
-	LEGS_NUM_BONE_MATRICES = 8,
-	LEGS_BONE_PELVIS = 8,
-	LEGS_NUM_TOTAL_MATRICES = 9,
-	LEGS_NUM_EXTRA_MATRICES = 1
-};
-struct LegsIKBlock {
-	vector3 offsetLocs[8];
-	IKSkelData theIKData[2];
-	uint32_t boneIxs[8];   // LegsBones
-	uint32_t otherMatrixIxs[1];
-	uint32_t iPadding[3];
-};
-
-enum ArmHandsCompressedBones : uint32_t {
-	ARMS_BONE_L_CLAVICLE = 0,
-	ARMS_BONE_L_UPPERARM = 1,
-	ARMS_BONE_L_FOREARM = 2,
-	ARMS_BONE_L_HAND = 3,
-	ARMS_BONE_R_CLAVICLE = 4,
-	ARMS_BONE_R_UPPERARM = 5,
-	ARMS_BONE_R_FOREARM = 6,
-	ARMS_BONE_R_HAND = 7,
-	ARMS_NUM_BONE_MATRICES = 8,
-	ARMS_BONE_L_FORE_TWIST_0 = 8,
-	ARMS_BONE_L_FORE_TWIST_1 = 9,
-	ARMS_BONE_R_FORE_TWIST_0 = 10,
-	ARMS_BONE_R_FORE_TWIST_1 = 11,
-	ARMS_BONE_NECK_PARENT = 12,
-	ARMS_NUM_TOTAL_MATRICES = 13,
-	ARMS_NUM_EXTRA_MATRICES = 5,
-	ARMS_NUM_FORE_TWIST_MATS = 4
-};
-struct ArmsHandsCompressedBlock {
-	vector3 offsetLocs[8];
-	vector3 foreTwistLocs[4];
-	uint32_t boneIxs[8]; // ArmBones
-	uint32_t otherMatrixIxs[5];
-};
-
-
-enum ArmsHandsIKBones : uint32_t {
-	ARMSIK_BONE_L_CLAVICLE = 0,
-	ARMSIK_BONE_R_CLAVICLE = 1,
-	ARMSIK_BONE_L_HAND = 2,
-	ARMSIK_BONE_R_HAND = 3,
-	ARMSIK_BONE_L_UPPERARM = 4,
-	ARMSIK_BONE_R_UPPERARM = 5,
-	ARMSIK_BONE_L_FOREARM = 6,
-	ARMSIK_BONE_R_FOREARM = 7,
-	ARMSIK_NUM_BONE_MATRICES = 8,
-	ARMSIK_BONE_L_FORE_TWIST_0 = 8,
-	ARMSIK_BONE_L_FORE_TWIST_1 = 9,
-	ARMSIK_BONE_R_FORE_TWIST_0 = 10,
-	ARMSIK_BONE_R_FORE_TWIST_1 = 11,
-	ARMSIK_BONE_NECK_PARENT = 12,
-	ARMSIK_BONE_PELVIS = 13,
-	ARMSIK_NUM_TOTAL_MATRICES = 14,
-	ARMSIK_NUM_EXTRA_MATRICES = 6,
-	ARMSIK_NUM_FORE_TWIST_MATS = 4
-};
-struct ArmsHandsIKBlock {
-	vector3 offsetLocs[8];
-	vector3 foreTwistLocs[4];
-	IKSkelData theIKData[2];
-	uint32_t boneIxs[8];
-	uint32_t otherMatrixIxs[6];
-	uint32_t iPadding[3];
-};
-
 struct nalComponentInfo {
 	int32_t index;
 	nalComponentType type;
 	int32_t flags;
 };
+
 
 struct nalSkeletonFileHeader {
 	uint32_t Class;
@@ -278,6 +60,19 @@ public:
 	nalSkeletonFileHeader header;
 	std::vector<nalComponentInfo> components;
 
+	std::vector<ComponentPose> poses;	// not in runtime
+
+	inline int GetPoseIndexForCompIndex(int compIndex) {
+		if (components[compIndex].flags & HAS_TRACK_DATA)
+			return -1;
+
+		int poseIx = -1;
+		for (int i = 0; i <= compIndex; ++i) {
+			if ((components[i].flags & HAS_TRACK_DATA) == 0)
+				++poseIx;
+		}
+		return poseIx;
+	}
 
 	nalSkeletonFile(std::ifstream& skel) {
 		skel.read(reinterpret_cast<char*>(&header), sizeof nalSkeletonFileHeader);
@@ -291,14 +86,20 @@ public:
 
 		if (header.numComponents) {
 			auto num = header.numComponents;
+			poses.resize(num);
 			if (header.components_offs > 0)
 				skel.seekg(header.components_offs, std::ios::beg);
 			else
 				return;
+
 			for (int i = 0; i < num; ++i) {
 				nalComponentInfo comp;
 				skel.read(reinterpret_cast<char*>(&comp), sizeof nalComponentInfo);
 				components.push_back(comp);
+
+				poses[i].compIndex = i;
+				poses[i].type = comp.type;
+				poses[i].pose = std::monostate{};
 			}
 		}
 
@@ -339,6 +140,10 @@ public:
 							skel.read(reinterpret_cast<char*>(&torso), sizeof TorsoHeadBlock);
 							for (int i = 0; i < TORSO_NUM_BONE_MATRICES; ++i)
 								printf("%s: %d \t%s", magic_enum::enum_name(magic_enum::enum_cast<TorsoHeadBones>(i).value()).data(), torso.boneIxs[i], i % 2 ? "\n" : "");
+
+							for (int i = 0; i < 5; ++i) {
+								printf("offsets[%d] %f %f %f\n", i, torso.offsetLocs[i].v[0], torso.offsetLocs[i].v[1], torso.offsetLocs[i].v[2] );
+							}
 							printf("\n");
 							break;
 						}
@@ -391,6 +196,133 @@ public:
 						}
 					}
 				}
+
+				if (header.defaultPoseOffsets_offs > 0) {
+					skel.seekg(header.defaultPoseOffsets_offs, std::ios::beg);
+
+					int32_t numPoseBlocks = 0;
+					skel.read(reinterpret_cast<char*>(&numPoseBlocks), sizeof numPoseBlocks);
+
+					std::vector<uint32_t> poseOffsets(numPoseBlocks);
+					skel.read(reinterpret_cast<char*>(poseOffsets.data()), numPoseBlocks * sizeof(uint32_t));
+					
+					uint32_t totalPoseBytes = poseOffsets.back();
+					std::vector<uint8_t> poseBlob(totalPoseBytes);
+
+					skel.seekg(header.defaultPoseOffsets_offs, std::ios::beg);
+					skel.read(reinterpret_cast<char*>(poseBlob.data()), totalPoseBytes);
+
+					auto getPoseFloats = [&](int poseIx) -> std::span<const float> {
+						uint32_t start = poseOffsets[poseIx];
+						uint32_t end = (poseIx + 1 < numPoseBlocks) ? poseOffsets[poseIx + 1] : totalPoseBytes;
+						auto* base = reinterpret_cast<const float*>(poseBlob.data() + start);
+						size_t count = (end - start) / 4;
+						return { base, count };
+					};
+
+					for (int i = 0; i < header.numComponents; ++i) {
+						auto& comp = components[i];
+						int pIx = GetPoseIndexForCompIndex(i);
+						if (pIx < 0) continue;
+
+						auto floats = getPoseFloats(pIx);
+
+						auto& cp = poses[i];
+						cp.compIndex = i;
+						cp.type      = comp.type;
+						switch (comp.type) {
+							case nalComponentType::TorsoHead_OneNeck_Compressed:
+							case nalComponentType::TorsoHead_TwoNeck_Compressed:
+							{
+								TorsoHeadPose pose{};
+								std::memcpy(&pose, floats.data(), sizeof(TorsoHeadPose));
+								cp.pose = pose;
+								break;
+							}
+
+							case nalComponentType::LegsFeet_Compressed:
+							{
+								LegsPose p{};
+								std::memcpy(&p, floats.data(), sizeof(LegsPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::LegsFeet_IK_Compressed:
+							{
+								LegsIKPose p{};
+								std::memcpy(&p, floats.data(), sizeof(LegsIKPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::ArmsHands_Compressed:
+							{
+								ArmsPose p{};
+								std::memcpy(&p, floats.data(), sizeof(ArmsPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::ArmsHands_IK_Compressed:
+							{
+								ArmStdPose p{};
+								std::memcpy(&p, floats.data(), sizeof(ArmStdPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::FiveFinger_Top2KnuckleCurl:
+							{
+								Fing5KnuckCurlPose p{};
+								std::memcpy(&p, floats.data(), sizeof(Fing5KnuckCurlPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::FiveFinger_ReducedAngular:
+							{
+								Fing5ReducedPose p{};
+								std::memcpy(&p, floats.data(), sizeof(Fing5ReducedPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::FiveFinger_FullRotational:
+							{
+								Fing5StdPose p{};
+								std::memcpy(&p, floats.data(), sizeof(Fing5StdPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::FiveFinger_IndividualCurl:
+							{
+								Fing5CurlPose p{};
+								std::memcpy(&p, floats.data(), sizeof(Fing5CurlPose));
+								cp.pose = p;
+								break;
+							}
+
+							case nalComponentType::FakerootEntropyCompressed:
+							{
+								FakerootPose p{};
+								std::memcpy(&p, floats.data(), sizeof(FakerootPose));
+								cp.pose = p;
+								break;
+							}
+
+							default:
+							{
+								if (floats.size_bytes() > 0)
+									printf("len (unhandled) = %zu\n", floats.size_bytes());
+								break;
+							}
+						}
+
+					}
+				}
+
 			}
 		}
 		skel.close();
