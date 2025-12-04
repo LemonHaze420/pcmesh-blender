@@ -159,8 +159,8 @@ public:
 						case nalComponentType::ArmsHands_Compressed: {
 							ArmsHandsCompressed arms;
 							skel.read(reinterpret_cast<char*>(&arms), sizeof ArmsHandsCompressed);
-							for (int i = 0; i < 15; ++i)
-								printf("%s: %d  \t%s", magic_enum::enum_name(magic_enum::enum_cast<FingerBones>(i).value()).data(), arms.boneidx[i], i % 2 ? "\n" : "");
+							for (int i = 0; i < ARMS_NUM_BONE_MATRICES; ++i)
+								printf("%s: %d  \t%s", magic_enum::enum_name(magic_enum::enum_cast<ArmHandsCompressedBones>(i).value()).data(), arms.boneidx[i], i % 2 ? "\n" : "");
 							break;
 						}
 						case nalComponentType::ArmsHands_IK_Compressed: {

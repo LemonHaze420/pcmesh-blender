@@ -80,19 +80,22 @@ public:
         ifs.read(reinterpret_cast<char*>(&data), sizeof nalCharAnimData);
         auto b = (int)ifs.tellg();
 
-        int compListAbs = base + data.compList_offs;
+        int compListAbs = base + data.compList_offs-8;
         int animListAbs = base + data.animUserData_offs;
         int trackListAbs = base + data.trackData_offs;
 
-        constexpr const int testSkelComponents = 7;
-        const int numComponents = skel ? skel->components.size() : testSkelComponents;
+        std::vector<iComponentID> comps;
+        if (skel) {
+            for (auto& comp : skel->components) 
+                comps.push_back(NalToComponentID(comp.type));
+        }
+        else 
+            comps = { iTorsoHeadEnt, iLegsIKEnt, iArmsEnt, iFing52KnuckEnt, iFakerootStdEnt, iArbitraryPO, igeneric };
 
         int animUserDataIx = 0;
         int trackIx = 0;
 
-        std::vector<int> compTracks;
-
-        for (int compIx = 0; compIx < numComponents; ++compIx) {
+        for (auto& compIx : comps) {
             int perAnimDataOffs = animListAbs;
             int flags = 0;
             ifs.seekg(compListAbs + compIx * 4, std::ios::beg);
@@ -127,7 +130,7 @@ public:
                 ifs.read(reinterpret_cast<char*>(&trackOffset), 4);
                 int trackDataAbs = trackListAbs + trackOffset;
 
-                auto ntracks = get_num_tracks(mask), len = -1;
+                auto ntracks = get_num_tracks(mask), len = get_numBytes_for_comp((iComponentID)compIx, mask);
                 auto nquats = get_num_quats(mask);
                 switch ((iComponentID)compIx) {
                     case iComponentID::iTorsoHeadStdPose:
@@ -157,19 +160,11 @@ public:
                 if (len != -1 && nquats > 0)
                 {
                     std::vector<uint8_t> codecBytes(ntracks);
-                    {
-                        auto savedPos = ifs.tellg();
-                        ifs.seekg(codecIxsAbs, std::ios::beg);
-                        ifs.read(reinterpret_cast<char*>(codecBytes.data()), ntracks);
-                        ifs.seekg(savedPos, std::ios::beg);
-                    }
                     std::vector<uint8_t> encoded_data(len);
-                    {
-                        auto savedPos = ifs.tellg();
-                        ifs.seekg(trackDataAbs, std::ios::beg);
-                        ifs.read(reinterpret_cast<char*>(encoded_data.data()), len);
-                        ifs.seekg(savedPos, std::ios::beg);
-                    }
+                    ifs.seekg(codecIxsAbs, std::ios::beg);
+                    ifs.read(reinterpret_cast<char*>(codecBytes.data()), codecBytes.size());
+                    ifs.seekg(trackDataAbs, std::ios::beg);
+                    ifs.read(reinterpret_cast<char*>(encoded_data.data()), encoded_data.size());
 
                     std::vector<CharEntropyDecoder::EncTrackData> tracks(ntracks);
                     CharEntropyDecoder::CharChannelDecoder decoder(encoded_data.data(), tracks);
@@ -297,10 +292,18 @@ public:
     int main(int argc, char ** argp)
     {
         std::filesystem::path path = argp[1];
-        auto read = [](auto path) {
+        nalSkeletonFile* skeleton = nullptr;
+        if (argc >= 3) {
+            std::filesystem::path skel_path = argp[2];
+            std::ifstream skel(skel_path, std::ios::binary);
+            if (skel.good())
+                skeleton = new nalSkeletonFile(skel);
+        }
+        auto read = [skeleton](auto path) {
             std::ifstream ifs(path, std::ios::binary);
+
             if (ifs.good()) {
-                nalAnimFile anim(ifs);
+                nalAnimFile anim(ifs, skeleton);
                 if (anim.animations.size()) {
                     std::cout << "name=" << anim.header.Name.string << "\n";
                     for (const auto& skel : anim.skeletons)

@@ -3053,18 +3053,20 @@ namespace CharEntropyDecoder {
         int frameIx;
         std::vector<float> track;
     };
-    static inline void DecomposeTrack(TrackData& track, std::vector<EncTrackData>& tracks, int compIx, int frame, int ntracks)
+    static inline void DecomposeTrack(TrackData& out_track, std::vector<EncTrackData>& tracks, int compIx, int frame, int ntracks)
     {
-        track.compIx = compIx;
-        track.frameIx = frame;
-        track.track.clear();
+        out_track.compIx = compIx;
+        out_track.frameIx = frame;
+        out_track.track.clear();
         for (int t = 0; t < ntracks; ++t) {
-            track.track.push_back(tracks[t].fWholeValue);
+            out_track.track.push_back(tracks[t].fWholeValue);
+#           if _DEBUG
             printf("[C%02d][%d/%d] zeros=%d whole=%f delta=%f secDelta=%f\n", compIx, t + 1, ntracks,
                                                                                              tracks[t].iNumZerosInTrack,
                                                                                              tracks[t].fWholeValue,
                                                                                              tracks[t].fDeltaValue,
                                                                                              tracks[t].fSecDeltaValue);
+#           endif
         }
     }
 }
