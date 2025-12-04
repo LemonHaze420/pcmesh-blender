@@ -1,4 +1,5 @@
 #pragma once
+#include <variant>
 
 #define u32 uint32_t
 #define s32 int32_t
@@ -223,6 +224,16 @@ inline int getNumBytes_LegsIK(uint32_t mask) {
     return to_bytes(getNumTracks_LegsIK(mask));
 }
 
+// ArmsIK 
+
+inline int getNumTracks_ArmIK(uint32_t mask) {
+    return count(mask, 0xFu, 3) + count(mask, 0xCu, 4);
+}
+
+inline int getNumBytes_ArmIK(uint32_t mask) {
+    return to_bytes(getNumTracks_ArmIK(mask));
+}
+
 // Arms & Standard Legs
 
 inline int getNumTracks_Limbs(uint32_t mask, int base_tracks) {
@@ -329,6 +340,7 @@ static inline int get_numBytes_for_comp(iComponentID compIx, int mask) {
             break;
         }
         case iArmIKEnt: {
+            len = getNumBytes_ArmIK(mask);
             break;
         }
         case iTentacleEnt: {
@@ -400,6 +412,42 @@ constexpr std::string_view component_to_string(nalComponentType e) {
     case nalComponentType::FiveFinger_ReducedAngular:   return "Five Finger Reduced-size Angular Entropy Compressed";
     case nalComponentType::FiveFinger_FullRotational:   return "Five Finger Full-Rotational Entropy Compressed";
     default:                                  return "Unknown type";
+    }
+}
+
+inline iComponentID NalToComponentID(nalComponentType t)
+{
+    switch (t)
+    {
+        case nalComponentType::ArbitraryPO:
+            return iArbitraryPO;
+        case nalComponentType::FakerootEntropyCompressed:
+            return iFakerootStdEnt;
+        case nalComponentType::TorsoHead_TwoNeck_Compressed:
+        case nalComponentType::TorsoHead_OneNeck_Compressed:
+            return iTorsoHeadEnt;
+        case nalComponentType::LegsFeet_Compressed:
+            return iLegsEnt;
+        case nalComponentType::LegsFeet_IK_Compressed:
+            return iLegsIKEnt;
+        case nalComponentType::ArmsHands_Compressed:
+            return iArmsEnt;
+        case nalComponentType::ArmsHands_IK_Compressed:
+            return iArmIKEnt;
+        case nalComponentType::Tentacles_Compressed:
+            return iTentacleEnt;
+        case nalComponentType::FiveFinger_Top2KnuckleCurl:
+            return iFing52KnuckEnt;
+        case nalComponentType::FiveFinger_IndividualCurl:
+            return iFing5CurlEnt;
+        case nalComponentType::FiveFinger_ReducedAngular:
+            return iFing5RedEnt;
+        case nalComponentType::FiveFinger_FullRotational:
+            return iFing5Ent;
+
+        case nalComponentType::Generic:
+        default:
+            return igeneric;
     }
 }
 
@@ -613,6 +661,17 @@ enum ArmHandsCompressedBones : uint32_t {
     ARMS_NUM_EXTRA_MATRICES = 5,
     ARMS_NUM_FORE_TWIST_MATS = 4
 };
+
+enum ArmsStdQuatTracks : uint32_t {
+    ARMS_TRACK_L_CLAVICLE_QUAT = 0,
+    ARMS_TRACK_R_CLAVICLE_QUAT = 1,
+    ARMS_TRACK_L_HAND = 2,
+    ARMS_TRACK_R_HAND = 3,
+    ARMS_NUM_QUAT_TRACKS = 2,
+    ARMS_NUM_TOTAL_TRACKS = 4,
+    ARMS_NUM_HAND_TRACKS = 2
+};
+
 enum ArmsQuatTracks : uint32_t {
     TRACK_L_CLAVICLE_QUAT = 0,
     TRACK_L_UPPERARM_QUAT = 1,
