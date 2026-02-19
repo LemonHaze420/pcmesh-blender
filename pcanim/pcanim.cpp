@@ -6,6 +6,8 @@
 #include <fstream>
 #include <istream>
 #include <vector>
+#include <array>
+
 #include "../common.h"
 #include "../pcskel/pcskel.cpp"
 #include "codec.hpp"
@@ -57,7 +59,6 @@ struct nalCharAnimData {
     s32 animTrackCount;     // 
     s32 m_pAnimUserData[8]; // 
 };
-
 class nalCharAnim {
 public:
     nalCharAnimData data;
@@ -111,7 +112,7 @@ public:
                 ifs.read(reinterpret_cast<char*>(&elemOffset), 4);
 
                 perAnimDataOffs += elemOffset;
-                printf("[A][C%02d][0x%X] 0x%X\n", compIx, elemOffset, perAnimDataOffs);
+                //printf("[A][%02d][%s][0x%X] 0x%X\n", compIx, magic_enum::enum_name(magic_enum::enum_cast<iComponentID>(compIx).value()).data(), elemOffset, perAnimDataOffs);
                 ++animUserDataIx;
             }
 
@@ -132,30 +133,6 @@ public:
 
                 auto ntracks = get_num_tracks(mask), len = get_numBytes_for_comp((iComponentID)compIx, mask);
                 auto nquats = get_num_quats(mask);
-                switch ((iComponentID)compIx) {
-                    case iComponentID::iTorsoHeadStdPose:
-                    case iComponentID::iTorsoHeadEnt:
-                    {
-                        len = getNumBytes_TorsoHeadEnt(mask);
-                        printf("[T][C%02d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, nquats, ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
-                        printf("ntracks=%d\n", ntracks);
-                        printf("len=%d\n", len);
-                        if (len)
-                            printf("decoded len=%d\n", 16 * (ntracks + 15));
-                        break;
-                    }
-                    case iComponentID::iLegsEnt:
-                    {
-                        len = getNumBytes_StandardLegsFeet(mask);
-                        printf("[T][C%02d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
-                        break;
-                    }
-                    default:
-                    {
-                        printf("[T][C%02d] q=%d t=%d [extras=%s] @ 0x%X\n", compIx, get_num_quats(mask), ntracks, get_has_extras(mask) ? "true" : "false", trackDataAbs);
-                        continue;
-                    }
-                }
 
                 if (len != -1 && nquats > 0)
                 {
@@ -178,24 +155,48 @@ public:
                         DecomposeTrack(track, tracks, compIx, frame, ntracks);
                         decoded_tracks.push_back(track);
 
-                        #if _DEBUG
+                        #if 1 //_DEBUG
                         for (int q = 0; q < nquats; ++q) {
                             int base = 3 * q;
-                            printf("[%s] x=%f y=%f z=%f\n", compIx != iLegsEnt ? magic_enum::enum_name(magic_enum::enum_cast<TorsoHeadTracks>(q).value()).data() : magic_enum::enum_name(magic_enum::enum_cast<LegsTracks>(q).value()).data(),
-                                                            tracks[base].fWholeValue,
-                                                            tracks[base + 1].fWholeValue,
-                                                            tracks[base + 2].fWholeValue);
+
+                            const char* boneName = "ROOT";
+                            switch (compIx) {
+                                case iTorsoHeadEnt:
+                                case iTorsoHeadStdPose:
+                                    boneName = magic_enum::enum_name(magic_enum::enum_cast<TorsoHeadTracks>(q).value()).data();
+                                    break;
+                                case iArmsEnt:
+                                    boneName = magic_enum::enum_name(magic_enum::enum_cast<ArmsStdQuatTracks>(q).value()).data();
+                                    break;
+                                case iArmIKEnt:
+                                    boneName = magic_enum::enum_name(magic_enum::enum_cast<ArmsQuatTracks>(q).value()).data();
+                                    break;
+                                case iLegsEnt:
+                                case iLegsIKEnt:
+                                    boneName = magic_enum::enum_name(magic_enum::enum_cast<LegsTracks>(q).value()).data();
+                                    break;
+                            }
+
+
+
+                            printf("[T: %04d][%02d][%s][%s] x=%f y=%f z=%f\n", frame, compIx, 
+                                                                                            magic_enum::enum_name(magic_enum::enum_cast<iComponentID>(compIx).value()).data(),
+                                                                                            boneName,
+                                                                                            tracks[base].fWholeValue,
+                                                                                            tracks[base + 1].fWholeValue,
+                                                                                            tracks[base + 2].fWholeValue);
                         }
                         if (get_has_extras(mask)) {
                             int base = 3 * nquats;
                             for (int e = 0; e < 6; ++e) {
-                                printf("[C%02d][E%d] v=%f\n", compIx, e, tracks[base + e].fWholeValue);
+                                printf("[T: %04d][%02d][%s][E%d] v=%f\n", frame, compIx, magic_enum::enum_name(magic_enum::enum_cast<iComponentID>(compIx).value()).data(), e, tracks[base + e].fWholeValue);
                             }
                         }
                         #endif
                     }
                 }
                 trackIx++;          // @todo: just for now same as below, only increment if we match this component & apply
+
             }
         }
         ifs.seekg(b);               // doing this to cleanly read all for now

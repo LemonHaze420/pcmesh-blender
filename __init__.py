@@ -103,6 +103,28 @@ def load_asset(asset_path):
 
     return None
 
+def _create_material_for_section(mat_path, name):
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+    output_node = nodes.new(type="ShaderNodeOutputMaterial")
+    principled = nodes.new(type="ShaderNodeBsdfPrincipled")
+    links.new(principled.outputs["BSDF"], output_node.inputs["Surface"])
+    if mat_path:
+        found = load_asset(os.path.join(os.path.dirname(mat_path), name))
+        if found:
+            try:
+                img = bpy.data.images.load(found)
+            except Exception:
+                pass
+            else:
+                img_node = nodes.new(type="ShaderNodeTexImage")
+                img_node.image = img
+                links.new(img_node.outputs["Color"], principled.inputs["Base Color"])
+    return mat
+
 def assign_texture_to_object(texture_path, object_name, mat=0):
     found_path = load_asset(texture_path)
     if not found_path:
@@ -153,7 +175,7 @@ def assign_texture_to_object(texture_path, object_name, mat=0):
         print(f"Object '{object_name}' not found")
 
 def create_mesh(path, mesh_data):
-        
+    
     # create all bones first
     armature = bpy.data.armatures.new(f"{mesh_data.name}_Armature")
     armature_name = f"{mesh_data.name}_Armature"
@@ -163,10 +185,7 @@ def create_mesh(path, mesh_data):
     bpy.context.view_layer.objects.active = armature_object
     
     bpy.ops.object.mode_set(mode='EDIT')
-
     idx_to_bone = {}      # { bone_id (int) -> edit_bone }
-    
-    bpy.ops.object.mode_set(mode='EDIT')
     arm = armature_object
     edit_bones = arm.data.edit_bones
     
@@ -249,10 +268,25 @@ def create_mesh(path, mesh_data):
         prim = section['primitive_type']
 
         faces = create_faces_from_indices(indices=section['indices'], primitive_type=prim)
+        section_face_ranges.append((len(all_faces), len(faces), section))        
         faces = [tuple(v + vertex_offset for v in face) for face in faces]
 
         all_vertices.extend(verts)
         all_faces.extend(faces)
+        print(section['section_name'])
+        mats = section.get('materials', [])
+        selected_mat = None
+        for mat_name, tex_name in mats:
+            if isinstance(mat_name, (bytes, bytearray)):
+                mat_name_dec = mat_name.decode("utf-8").rstrip("\x00")
+            else:
+                mat_name_dec = str(mat_name)
+            if mat_name_dec == section['section_name']:
+                selected_mat = tex_name
+                print(selected_mat)
+                break
+        section_materials.append(selected_mat)
+        section["resolved_material"] = selected_mat
 
         if section.get("uvs"):
             all_uvs.extend(section["uvs"])
@@ -270,7 +304,7 @@ def create_mesh(path, mesh_data):
 
     mesh.from_pydata(all_vertices, [], all_faces)
     mesh.update()
-
+    
     if any(all_uvs):
         uv_layer = mesh.uv_layers.new()
         for loop in mesh.loops:
@@ -295,8 +329,13 @@ def create_mesh(path, mesh_data):
     mod.object = armature_object
     
     section0 = mesh_data.sections[0]
-    if section0.get('materials'):       # @todo: multiple mats
-        assign_texture_to_object(os.path.join(os.path.dirname(path), section0['materials'][0]), mesh_data.name)#section['name'])                
+    #if section0.get('materials'):       # @todo: multiple mats
+        #assign_texture_to_object(os.path.join(os.path.dirname(path), section0['materials'][0]), mesh_data.name)#section['name'])                
+        
+    for mat in section_materials:
+        if mat:
+            assign_texture_to_object(os.path.join(os.path.dirname(path), mat), mesh_data.name)
+        
     obj.parent = armature_object
     
     """

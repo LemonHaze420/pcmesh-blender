@@ -741,9 +741,13 @@ class MeshData:
         self.sections = []
         self.bones = []
 
-    def add_section(self, name, primitive_type, vertices, uvs, normals, indices, materials, bones=None):
+    def add_section(self, name, section_name, primitive_type, vertices, uvs, normals, indices, materials, bones=None):
         section_data = {
             "name": name,
+            "section_name": (
+                section_name if section_name not in (None, "", b"", b"\x00")
+                else (materials[0][0].decode("utf-8").rstrip("\x00") if materials else name)
+            ),
             "primitive_type": primitive_type,
             "vertices": vertices,
             "uvs": uvs,
@@ -970,6 +974,7 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
     mesh_data = MeshData(name=ndisplay) 
     
     offset = Mesh.Bones
+    print(f"nBones = {Mesh.NBones}")
     for _ in range(Mesh.NBones):
         mat = struct.unpack_from('16f', buffer_bytes, offset)
         matrix = [mat[i:i+4] for i in range(0, 16, 4)]
@@ -980,9 +985,12 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
     for idx, section in enumerate(sections):
         offset = section.Section
         meshSection = nglMeshSection.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMeshSection))])
-
+        
+        print(meshSection.Material)
+        
         offset = meshSection.Name
         name = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
+        section_name = name.field_4.decode("utf-8").rstrip("\x00")
         
         if write_obj:
                 resource_file.write("o " + ndisplay + '_' + str(idx) + '\n')
@@ -1049,12 +1057,9 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
         indices_data_t = c_short * int(meshSection.NIndices)
         indices = indices_data_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(indices_data_t))])
 
-        #resource_file.write("\nIndices: ")
-
         print("NIndices = %d" % (meshSection.NIndices))
 
         if meshSection.NIndices != 0:
-
             num_vertices = int(meshSection.NVertices)
             max_index = max(list(indices))
             print("max_index = %d, NVertices = %d" % (max_index, num_vertices))
@@ -1104,11 +1109,12 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
                 })
                 
         section_bones_idx = []
+        print(f"nbones = {meshSection.NBones}")
         if meshSection.NBones and meshSection.BonesIdx:
             off_bones_idx = meshSection.BonesIdx
             bones_idx_t = c_ushort * int(meshSection.NBones)
             section_bones_idx = list(bones_idx_t.from_buffer_copy(buffer_bytes[off_bones_idx : (off_bones_idx + sizeof(bones_idx_t))]))
-
+        
         bones_mapped = []
         if local_bones:
             for v_idx, v in enumerate(local_bones):
@@ -1126,9 +1132,10 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
                 else:
                     final_idxs = [int(li) for li in local_idxs]
                 bones_mapped.append({"indices": final_idxs, "weights": weights})
-
+        
         mesh_data.add_section(
             name=ndisplay + '_' + str(idx),
+            section_name=section_name,
             primitive_type=meshSection.m_primitiveType,
             vertices=vertices,
             uvs=uvs,
@@ -1192,7 +1199,7 @@ def read_meshfile(file, write_obj:bool = False):
                 texName = texName.field_4.decode("utf-8")
                 texName = f"{texName.upper()}.DDS"
                 print(f"Texture: {texName}")
-                materials.append(texName)
+                materials.append([MaterialName.field_4, texName])
                 #assert(Material.field_44 == 1)
 
             elif type_dir_entry == int(TypeDirectoryEntry.MESH):
@@ -1200,5 +1207,6 @@ def read_meshfile(file, write_obj:bool = False):
                 offset = entry.field_4
                 mesh = nglMesh.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMesh))])
                 mesh_data.append(read_mesh(mesh, buffer_bytes, materials, write_obj))
+    print(materials)
     return mesh_data
 
