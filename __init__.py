@@ -458,14 +458,6 @@ def create_mesh(path, mesh_data):
         
     obj.parent = armature_object
     
-    """
-        # Normals
-        #if section['normals']:
-        #   if len(section['normals']) == len(vertices):
-        #       mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
-        #       mesh.normals_split_custom_set_from_vertices(section['normals'])
-        #       mesh.use_auto_smooth = True
-    """
     print(f"Finished importing {mesh_data.name}")
     return obj
     
