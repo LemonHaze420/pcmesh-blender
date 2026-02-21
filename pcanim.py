@@ -371,6 +371,46 @@ def _quat_normalize_wxyz(q):
     return (w * inv, x * inv, y * inv, z * inv)
 
 
+def _quat_inverse_wxyz(q):
+    w, x, y, z = _quat_normalize_wxyz(q)
+    return (w, -x, -y, -z)
+
+
+def _quat_mul_wxyz(a, b):
+    aw, ax, ay, az = _quat_normalize_wxyz(a)
+    bw, bx, by, bz = _quat_normalize_wxyz(b)
+    return _quat_normalize_wxyz((
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ))
+
+
+_BASIS_M_ENGINE_TO_BLENDER = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
+_BASIS_M_BLENDER_TO_ENGINE = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, -1.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
+
+
+def _engine_to_blender_quat_wxyz(q):
+    qn = _quat_normalize_wxyz(q)
+    rot_eng = _mat_from_quat_pos(qn, (0.0, 0.0, 0.0))
+    rot_bl = _mat_local_to_world(
+        _mat_local_to_world(_BASIS_M_ENGINE_TO_BLENDER, rot_eng),
+        _BASIS_M_BLENDER_TO_ENGINE,
+    )
+    return _quat_from_matrix_wxyz(rot_bl)
+
+
 def _quat_from_xyz(x, y, z):
     w = math.sqrt(abs(1.0 - (x * x + y * y + z * z)))
     n2 = w * w + x * x + y * y + z * z
@@ -541,6 +581,7 @@ def _assign_rot_from_runtime_parent_world(
     frame_no,
     frame_xforms,
     parent_id,
+    default_quat=None,
 ):
     if bone_id is None:
         return
@@ -555,7 +596,10 @@ def _assign_rot_from_runtime_parent_world(
             parent_inv = _mat_rigid_inverse(frame_xforms[ipid])
             local_xform = _mat_local_to_world(local_xform, parent_inv)
 
-    _assign_rot(bone_tracks, ibid, frame_no, _quat_from_matrix_wxyz(local_xform))
+    q_local = _quat_from_matrix_wxyz(local_xform)
+    if default_quat is not None:
+        q_local = _quat_mul_wxyz(_quat_inverse_wxyz(default_quat), _quat_normalize_wxyz(q_local))
+    _assign_rot(bone_tracks, ibid, frame_no, _engine_to_blender_quat_wxyz(q_local))
 
 
 def _quat_from_matrix_wxyz(m):
@@ -717,7 +761,6 @@ def _decompose_ik_spin(base_model_matrix, base_joint_xyz, target_model_matrix, i
         cos_twist=cos_twist,
     )
 
-    # Runtime axis remap after nalIKMap2DTo3D
     def _remap_rows(m):
         r0 = list(m[0])
         r1 = list(m[1])
@@ -783,10 +826,26 @@ def _components_to_bone_tracks(
     ]
     torso_state_pelvis_pos = tuple(float(v) for v in torso_default.get("pelvis_pos", (0.0, 0.0, 0.0)))
 
-    def _assign_runtime_local_rot(bone_id, frame_no, quat_wxyz):
+    def _default_quat_or_none(quats, idx):
+        if idx < 0 or idx >= len(quats):
+            return None
+        q = quats[idx]
+        if not q or len(q) != 4:
+            return None
+        return _quat_normalize_wxyz(q)
+
+    def _assign_runtime_local_rot(bone_id, frame_no, quat_wxyz, default_quat=None):
         if bone_id is None:
             return
-        _assign_rot(bone_tracks, bone_id, frame_no, _quat_normalize_wxyz(quat_wxyz))
+        q_local = _quat_normalize_wxyz(quat_wxyz)
+        if default_quat is not None:
+            q_local = _quat_mul_wxyz(_quat_inverse_wxyz(default_quat), q_local)
+        _assign_rot(
+            bone_tracks,
+            bone_id,
+            frame_no,
+            _engine_to_blender_quat_wxyz(q_local),
+        )
 
     legs_std_bones = list(legs_std_comp.get("bone_indices", ())) if legs_std_comp else []
     legs_std_offsets = list(legs_std_comp.get("offset_locs", ())) if legs_std_comp else []
@@ -835,6 +894,9 @@ def _components_to_bone_tracks(
         for i in range(8)
     ]
     arms_ik_bones = list(arms_ik_comp.get("bone_indices", ())) if arms_ik_comp else []
+    arms_ik_default = (arms_ik_comp or {}).get("default_pose", {})
+    arms_ik_default_track_quats = list(arms_ik_default.get("track_quats", ()))
+    arms_ik_default_hand_quats = list(arms_ik_default.get("hand_quats", ()))
 
     # TorsoHeadBones
     TORSO_PELVIS = 0
@@ -908,7 +970,7 @@ def _components_to_bone_tracks(
                             pelvis_id = _safe_bone_idx(torso_bones, TORSO_PELVIS)
                             _assign_loc(bone_tracks, pelvis_id, frame_no, torso_state_pelvis_pos)
 
-                # Build component-local matrices using runtime component parent order.
+                # component-local
                 if len(torso_bones) >= 6 and len(torso_offsets) >= 5:
                     pelvis_id = _safe_bone_idx(torso_bones, TORSO_PELVIS)
                     if pelvis_id is not None:
@@ -938,18 +1000,33 @@ def _components_to_bone_tracks(
                     _cache_component_world_write_once(frame_mats, comp_world)
 
                     if pelvis_id is not None:
-                        _assign_runtime_local_rot(pelvis_id, frame_no, torso_state_quats[5])
+                        _assign_runtime_local_rot(
+                            pelvis_id,
+                            frame_no,
+                            torso_state_quats[5],
+                            default_quat=_default_quat_or_none(torso_default_quats, 5),
+                        )
 
                     for i in range(5):
                         bid = _safe_bone_idx(torso_bones, i + 1)
                         if bid is None:
                             continue
-                        _assign_runtime_local_rot(bid, frame_no, torso_state_quats[i])
+                        _assign_runtime_local_rot(
+                            bid,
+                            frame_no,
+                            torso_state_quats[i],
+                            default_quat=_default_quat_or_none(torso_default_quats, i),
+                        )
 
                     if torso_has_empty_neck and len(torso_other) >= 1:
                         other0 = int(torso_other[0])
                         if other0 >= 0 and other0 in frame_mats:
-                            _assign_runtime_local_rot(other0, frame_no, empty_neck_orient)
+                            _assign_runtime_local_rot(
+                                other0,
+                                frame_no,
+                                empty_neck_orient,
+                                default_quat=empty_neck_orient,
+                            )
 
             elif comp_ix == COMP_LEGS_IK:
                 frame_mats = _frame_map(frame_no)
@@ -1053,7 +1130,6 @@ def _components_to_bone_tracks(
 
                     _cache_component_world_write_once(frame_mats, comp_world)
 
-                # Track quats are already component-local; write directly.
                 l_toe_id = _safe_bone_idx(legs_ik_bones, 0)
                 r_toe_id = _safe_bone_idx(legs_ik_bones, 1)
                 l_foot_id = _safe_bone_idx(legs_ik_bones, 2)
@@ -1062,25 +1138,64 @@ def _components_to_bone_tracks(
                 l_calf_id = _safe_bone_idx(legs_ik_bones, 5)
                 r_thigh_id = _safe_bone_idx(legs_ik_bones, 6)
                 r_calf_id = _safe_bone_idx(legs_ik_bones, 7)
-                _assign_runtime_local_rot(l_toe_id, frame_no, legs_ik_state_toe_quats[0])
-                _assign_runtime_local_rot(r_toe_id, frame_no, legs_ik_state_toe_quats[1])
-                _assign_runtime_local_rot(l_foot_id, frame_no, legs_ik_state_foot_quats[0])
-                _assign_runtime_local_rot(r_foot_id, frame_no, legs_ik_state_foot_quats[1])
+                _assign_runtime_local_rot(
+                    l_toe_id,
+                    frame_no,
+                    legs_ik_state_toe_quats[0],
+                    default_quat=_default_quat_or_none(legs_ik_default_quats, 0),
+                )
+                _assign_runtime_local_rot(
+                    r_toe_id,
+                    frame_no,
+                    legs_ik_state_toe_quats[1],
+                    default_quat=_default_quat_or_none(legs_ik_default_quats, 1),
+                )
+                _assign_runtime_local_rot(
+                    l_foot_id,
+                    frame_no,
+                    legs_ik_state_foot_quats[0],
+                    default_quat=_default_quat_or_none(legs_ik_default_quats, 2),
+                )
+                _assign_runtime_local_rot(
+                    r_foot_id,
+                    frame_no,
+                    legs_ik_state_foot_quats[1],
+                    default_quat=_default_quat_or_none(legs_ik_default_quats, 3),
+                )
 
-                # Procedural IK outputs are converted using runtime component parents only.
                 if can_build_legs_ik and solve_ik:
                     anchor_id = int(legs_ik_other[0]) if len(legs_ik_other) >= 1 else -1
                     _assign_rot_from_runtime_parent_world(
-                        bone_tracks, l_thigh_id, frame_no, frame_mats, anchor_id
+                        bone_tracks,
+                        l_thigh_id,
+                        frame_no,
+                        frame_mats,
+                        anchor_id,
+                        default_quat=_default_quat_or_none(legs_std_default_quats, 4),
                     )
                     _assign_rot_from_runtime_parent_world(
-                        bone_tracks, l_calf_id, frame_no, frame_mats, l_thigh_id
+                        bone_tracks,
+                        l_calf_id,
+                        frame_no,
+                        frame_mats,
+                        l_thigh_id,
+                        default_quat=_default_quat_or_none(legs_std_default_quats, 5),
                     )
                     _assign_rot_from_runtime_parent_world(
-                        bone_tracks, r_thigh_id, frame_no, frame_mats, anchor_id
+                        bone_tracks,
+                        r_thigh_id,
+                        frame_no,
+                        frame_mats,
+                        anchor_id,
+                        default_quat=_default_quat_or_none(legs_std_default_quats, 6),
                     )
                     _assign_rot_from_runtime_parent_world(
-                        bone_tracks, r_calf_id, frame_no, frame_mats, r_thigh_id
+                        bone_tracks,
+                        r_calf_id,
+                        frame_no,
+                        frame_mats,
+                        r_thigh_id,
+                        default_quat=_default_quat_or_none(legs_std_default_quats, 7),
                     )
 
             elif comp_ix == COMP_LEGS:
@@ -1125,7 +1240,12 @@ def _components_to_bone_tracks(
                         bid = _safe_bone_idx(legs_std_bones, i)
                         if bid is None:
                             continue
-                        _assign_runtime_local_rot(bid, frame_no, legs_std_state_quats[i])
+                        _assign_runtime_local_rot(
+                            bid,
+                            frame_no,
+                            legs_std_state_quats[i],
+                            default_quat=_default_quat_or_none(legs_std_default_quats, i),
+                        )
                 else:
                     bit_to_role = {
                         0: LEGS_L_TOE,
@@ -1142,7 +1262,12 @@ def _components_to_bone_tracks(
                         if (mask & (1 << bit)) == 0:
                             continue
                         bone_id = _safe_bone_idx(legs_std_bones, role)
-                        _assign_runtime_local_rot(bone_id, frame_no, legs_std_state_quats[bit])
+                        _assign_runtime_local_rot(
+                            bone_id,
+                            frame_no,
+                            legs_std_state_quats[bit],
+                            default_quat=_default_quat_or_none(legs_std_default_quats, bit),
+                        )
 
             elif comp_ix == COMP_ARMS:
                 use_ik = not arms_bones and bool(arms_ik_bones)
@@ -1254,7 +1379,12 @@ def _components_to_bone_tracks(
                         bid = _safe_bone_idx(arms_bones, role)
                         if bid is None:
                             continue
-                        _assign_runtime_local_rot(bid, frame_no, arms_state_quats[role])
+                        _assign_runtime_local_rot(
+                            bid,
+                            frame_no,
+                            arms_state_quats[role],
+                            default_quat=_default_quat_or_none(arms_default_quats, role),
+                        )
 
                     for i in range(4):
                         if i >= len(arms_other):
@@ -1288,7 +1418,19 @@ def _components_to_bone_tracks(
                                 if role not in (ARMS_L_CLAV, ARMS_R_CLAV, ARMS_L_HAND, ARMS_R_HAND):
                                     continue
                         bone_id = _safe_bone_idx(arm_indices, int(role))
-                        _assign_runtime_local_rot(bone_id, frame_no, pending[bit])
+                        default_q = None
+                        if use_ik:
+                            if role == ARMSIK_L_CLAV:
+                                default_q = _default_quat_or_none(arms_ik_default_track_quats, 0)
+                            elif role == ARMSIK_R_CLAV:
+                                default_q = _default_quat_or_none(arms_ik_default_track_quats, 1)
+                            elif role == ARMSIK_L_HAND:
+                                default_q = _default_quat_or_none(arms_ik_default_hand_quats, 0)
+                            elif role == ARMSIK_R_HAND:
+                                default_q = _default_quat_or_none(arms_ik_default_hand_quats, 1)
+                        else:
+                            default_q = _default_quat_or_none(arms_default_quats, int(role))
+                        _assign_runtime_local_rot(bone_id, frame_no, pending[bit], default_quat=default_q)
 
             elif comp_ix == COMP_ARMS_IK:
                 for bit in range(2):
@@ -1300,7 +1442,8 @@ def _components_to_bone_tracks(
                     role = ARMSIK_L_CLAV if bit == 0 else ARMSIK_R_CLAV
                     bone_id = _safe_bone_idx(arms_ik_bones, role)
                     q = _quat_from_xyz(*xyz)
-                    _assign_runtime_local_rot(bone_id, frame_no, q)
+                    default_q = _default_quat_or_none(arms_ik_default_track_quats, 0 if bit == 0 else 1)
+                    _assign_runtime_local_rot(bone_id, frame_no, q, default_quat=default_q)
 
                 for bit in range(2, 4):
                     if (mask & (1 << bit)) == 0:
@@ -1317,7 +1460,8 @@ def _components_to_bone_tracks(
                     role = ARMSIK_L_HAND if bit == 2 else ARMSIK_R_HAND
                     bone_id = _safe_bone_idx(arms_ik_bones, role)
                     q = _quat_from_xyz(*qxyz)
-                    _assign_runtime_local_rot(bone_id, frame_no, q)
+                    default_q = _default_quat_or_none(arms_ik_default_hand_quats, 0 if bit == 2 else 1)
+                    _assign_runtime_local_rot(bone_id, frame_no, q, default_quat=default_q)
 
     return bone_tracks
 
@@ -1377,7 +1521,7 @@ def open_pcanim(
 
     seen = set()
     cur = int(first_anim)
-    limit = max(0, num_anims) if num_anims > 0 else 4096
+    limit = max(4096, int(num_anims) if num_anims > 0 else 0)
 
     while cur and cur not in seen and len(out["animations"]) < limit:
         if cur < 0 or cur >= len(blob):

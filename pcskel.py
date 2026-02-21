@@ -216,6 +216,7 @@ class NalSkeletonParser:
                                     comp["default_pose"] = default_poses[cix]
                 except Exception:
                     pass
+
         return self.result
 
     def _get_pose_index_for_comp_index(self, component_meta, comp_index):
