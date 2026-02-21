@@ -45,7 +45,8 @@ class ArmsHandsIKBones(IntEnum):
     R_FORE_TWIST_1 = 11; NECK_PARENT = 12; PELVIS = 13
 
 class ComponentFlags(IntEnum):
-    ENABLED = 1
+    HAS_TRACK_DATA = 1
+    HAS_PER_ANIM_DATA = 2
     HAS_SKEL_DATA = 4
 
 def read_vec3(f): return struct.unpack('<3f', f.read(12))
@@ -79,6 +80,8 @@ class NalSkeletonParser:
         self.result = {
             "header": {},
             "components": [],
+            "component_meta": [],
+            "default_poses": {},
             "bone_map": self.bone_map,
             "parent_map": self.parent_map,
             "component_bone_names": self.component_bone_names,
@@ -103,8 +106,20 @@ class NalSkeletonParser:
             
             header_rest = struct.unpack('<Iiiiii', f.read(24))
             num_components = header_rest[0]
+            pose_data_align = header_rest[1]
+            pose_data_size = header_rest[2]
             components_offs = header_rest[3]
             per_skel_data_int_offs = header_rest[4]
+            default_pose_offsets_offs = header_rest[5]
+
+            self.result["header"].update({
+                "num_components": int(num_components),
+                "pose_data_align": int(pose_data_align),
+                "pose_data_size": int(pose_data_size),
+                "components_offs": int(components_offs),
+                "per_skel_data_int_offs": int(per_skel_data_int_offs),
+                "default_pose_offsets_offs": int(default_pose_offsets_offs),
+            })
 
             component_meta = []
 
@@ -113,6 +128,8 @@ class NalSkeletonParser:
                 for _ in range(num_components):
                     c_idx, c_type, c_flags = struct.unpack('<iIi', f.read(12))
                     component_meta.append({'index': c_idx, 'type': c_type, 'flags': c_flags})
+
+            self.result["component_meta"] = component_meta
 
             if per_skel_data_int_offs > 0:
                 f.seek(per_skel_data_int_offs)
@@ -151,11 +168,210 @@ class NalSkeletonParser:
                             data = self.parse_arbitrary_po(f, comp_block_start)
                         
                         if data:
+                            data["component_index"] = int(comp_idx)
+                            data["component_flags"] = int(meta["flags"])
                             data["type_id"] = comp_type
                             data["type_name"] = NalComponentType(comp_type).name if comp_type in list(NalComponentType) else "Unknown"
                             self.result["components"].append(data)
 
+            if default_pose_offsets_offs > 0 and num_components > 0:
+                try:
+                    f.seek(default_pose_offsets_offs)
+                    num_pose_blocks = struct.unpack('<i', f.read(4))[0]
+                    if 0 < num_pose_blocks < 4096:
+                        pose_offsets = list(struct.unpack(f'<{num_pose_blocks}I', f.read(4 * num_pose_blocks)))
+                        total_pose_bytes = int(pose_data_size)
+                        max_pose_offset = int(pose_offsets[-1]) if pose_offsets else 0
+
+                        if total_pose_bytes <= 0:
+                            total_pose_bytes = max_pose_offset
+                        elif max_pose_offset > total_pose_bytes:
+                            total_pose_bytes = max_pose_offset
+
+                        file_size = os.fstat(f.fileno()).st_size
+                        max_available = max(0, int(file_size - default_pose_offsets_offs))
+                        if total_pose_bytes <= 0 or total_pose_bytes > max_available:
+                            total_pose_bytes = max_available
+
+                        if total_pose_bytes > 0:
+                            f.seek(default_pose_offsets_offs)
+                            pose_blob = f.read(total_pose_bytes)
+
+                            self.result["default_pose_layout"] = {
+                                "num_pose_blocks": int(num_pose_blocks),
+                                "pose_offsets": [int(v) for v in pose_offsets],
+                                "pose_blob_size": int(total_pose_bytes),
+                            }
+
+                            default_poses = self._parse_default_poses(
+                                component_meta=component_meta,
+                                pose_offsets=pose_offsets,
+                                pose_blob=pose_blob,
+                            )
+                            self.result["default_poses"] = default_poses
+
+                            for comp in self.result["components"]:
+                                cix = int(comp.get("component_index", -1))
+                                if cix in default_poses:
+                                    comp["default_pose"] = default_poses[cix]
+                except Exception:
+                    pass
         return self.result
+
+    def _get_pose_index_for_comp_index(self, component_meta, comp_index):
+        if comp_index < 0 or comp_index >= len(component_meta):
+            return -1
+        if int(component_meta[comp_index].get('flags', 0)) & int(ComponentFlags.HAS_TRACK_DATA):
+            return -1
+
+        pose_ix = -1
+        for i in range(comp_index + 1):
+            if (int(component_meta[i].get('flags', 0)) & int(ComponentFlags.HAS_TRACK_DATA)) == 0:
+                pose_ix += 1
+        return pose_ix
+
+    def _parse_default_pose_bytes(self, comp_type, pose_bytes):
+        def unpack_quat_list(blob, count):
+            vals = struct.unpack(f'<{count * 4}f', blob[: count * 16])
+            out = []
+            for i in range(count):
+                x, y, z, w = vals[i * 4 : i * 4 + 4]
+                out.append((float(w), float(x), float(y), float(z)))
+            return out
+
+        comp_type = int(comp_type)
+
+        if comp_type in (int(NalComponentType.TorsoHead_TwoNeck_Compressed), int(NalComponentType.TorsoHead_OneNeck_Compressed)):
+            if len(pose_bytes) < 112:
+                return None
+            quats = unpack_quat_list(pose_bytes, 6)
+            px, py, pz = struct.unpack('<3f', pose_bytes[96:108])
+            return {
+                'kind': 'torso_pose',
+                'quats': quats,
+                'pelvis_pos': (float(px), float(py), float(pz)),
+            }
+
+        if comp_type == int(NalComponentType.LegsFeet_IK_Compressed):
+            if len(pose_bytes) < 96:
+                return None
+            quats = unpack_quat_list(pose_bytes, 4)
+            lx, ly, lz, rx, ry, rz = struct.unpack('<6f', pose_bytes[64:88])
+            lk, rk = struct.unpack('<2f', pose_bytes[88:96])
+            return {
+                'kind': 'legs_ik_pose',
+                'quats': quats,
+                'foot_pos': ((float(lx), float(ly), float(lz)), (float(rx), float(ry), float(rz))),
+                'knee_spin': (float(lk), float(rk)),
+            }
+
+        if comp_type == int(NalComponentType.LegsFeet_Compressed):
+            if len(pose_bytes) >= 128:
+                quats = unpack_quat_list(pose_bytes, 8)
+            elif len(pose_bytes) >= 64:
+                quats = unpack_quat_list(pose_bytes, 4)
+            else:
+                return None
+            return {
+                'kind': 'legs_pose',
+                'quats': quats,
+            }
+
+        if comp_type == int(NalComponentType.ArmsHands_Compressed):
+            if len(pose_bytes) < 128:
+                return None
+            quats = unpack_quat_list(pose_bytes, 8)
+            return {
+                'kind': 'arms_pose',
+                'quats': quats,
+            }
+
+        if comp_type == int(NalComponentType.ArmsHands_IK_Compressed):
+            if len(pose_bytes) < 96:
+                return None
+            q_tracks = unpack_quat_list(pose_bytes, 2)
+            q_hands = unpack_quat_list(pose_bytes[32:], 2)
+            lx, ly, lz, rx, ry, rz = struct.unpack('<6f', pose_bytes[64:88])
+            ls, rs = struct.unpack('<2f', pose_bytes[88:96])
+            return {
+                'kind': 'arms_ik_pose',
+                'track_quats': q_tracks,
+                'hand_quats': q_hands,
+                'hand_pos': ((float(lx), float(ly), float(lz)), (float(rx), float(ry), float(rz))),
+                'elbow_spin': (float(ls), float(rs)),
+            }
+
+        if comp_type == int(NalComponentType.FakerootEntropyCompressed):
+            if len(pose_bytes) < 48:
+                return None
+            q = unpack_quat_list(pose_bytes, 1)[0]
+            px, py, pz, floor = struct.unpack('<4f', pose_bytes[16:32])
+            sig_start, sig_count = struct.unpack('<2I', pose_bytes[32:40])
+            return {
+                'kind': 'fakeroot_pose',
+                'quat': q,
+                'pos': (float(px), float(py), float(pz)),
+                'floor_offset': float(floor),
+                'signal_start': int(sig_start),
+                'num_signals': int(sig_count),
+            }
+
+        return None
+
+    def _parse_default_poses(self, component_meta, pose_offsets, pose_blob):
+        def expected_pose_size(comp_type):
+            comp_type = int(comp_type)
+            size_map = {
+                int(NalComponentType.TorsoHead_TwoNeck_Compressed): 112,
+                int(NalComponentType.TorsoHead_OneNeck_Compressed): 112,
+                int(NalComponentType.LegsFeet_Compressed): 128,
+                int(NalComponentType.LegsFeet_IK_Compressed): 96,
+                int(NalComponentType.ArmsHands_Compressed): 128,
+                int(NalComponentType.ArmsHands_IK_Compressed): 96,
+                int(NalComponentType.FakerootEntropyCompressed): 48,
+                int(NalComponentType.FiveFinger_Top2KnuckleCurl): 192,
+                int(NalComponentType.FiveFinger_ReducedAngular): 176,
+                int(NalComponentType.FiveFinger_IndividualCurl): 112,
+                int(NalComponentType.FiveFinger_FullRotational): 480,
+            }
+            return int(size_map.get(comp_type, 0))
+
+        def infer_end_from_offsets(start, offsets, total_size):
+            higher = [int(v) for v in offsets if int(v) > int(start)]
+            if higher:
+                return min(higher)
+            return int(total_size)
+
+        default_poses = {}
+        num_pose_blocks = len(pose_offsets)
+        total_pose_bytes = len(pose_blob)
+
+        for comp_ix, meta in enumerate(component_meta):
+            pose_ix = self._get_pose_index_for_comp_index(component_meta, comp_ix)
+            if pose_ix < 0 or pose_ix >= num_pose_blocks:
+                continue
+
+            start = int(pose_offsets[pose_ix])
+            expected = expected_pose_size(meta.get('type', 0))
+            if expected > 0:
+                end = start + expected
+            else:
+                end = infer_end_from_offsets(start, pose_offsets, total_pose_bytes)
+
+            if start < 0 or end <= start or end > total_pose_bytes:
+                continue
+
+            pose_bytes = pose_blob[start:end]
+            parsed = self._parse_default_pose_bytes(meta.get('type', 0), pose_bytes)
+            if parsed is None:
+                continue
+
+            parsed['component_index'] = int(comp_ix)
+            parsed['component_type'] = int(meta.get('type', 0))
+            parsed['raw_size'] = int(len(pose_bytes))
+            default_poses[int(comp_ix)] = parsed
+
+        return default_poses
 
     def _map_bones(self, indices, enum_cls, count):
         for i in range(count):
@@ -171,8 +387,8 @@ class NalSkeletonParser:
         empty_neck_orient = read_vec4(f)
         empty_neck_pos = read_vec3(f)
         offset_locs = [read_vec3(f) for _ in range(5)]
-        bone_ixs = struct.unpack('<6I', f.read(24))
-        other_matrix_ixs = struct.unpack('<I', f.read(4))[0]
+        bone_ixs = struct.unpack('<6i', f.read(24))
+        other_matrix_ixs = struct.unpack('<i', f.read(4))[0]
 
         self._map_bones(bone_ixs, TorsoHeadBones, 6)
 
@@ -187,8 +403,8 @@ class NalSkeletonParser:
     def parse_legs_ik(self, f):
         offset_locs = [read_vec3(f) for _ in range(8)]
         ik_data = [read_ik_skel_data(f) for _ in range(2)]
-        bone_ixs = struct.unpack('<8I', f.read(32))
-        other_matrix_ixs = struct.unpack('<I', f.read(4))[0]
+        bone_ixs = struct.unpack('<8i', f.read(32))
+        other_matrix_ixs = struct.unpack('<i', f.read(4))[0]
         
         self._map_bones(bone_ixs, LegsBones, 8)
 
@@ -201,21 +417,33 @@ class NalSkeletonParser:
 
     def parse_arms_hands_compressed(self, f):
         vectors = [read_vec4(f) for _ in range(9)]
-        bone_ixs = struct.unpack('<16I', f.read(64))
+        bone_ixs = struct.unpack('<16i', f.read(64))
+
+        flat = [float(c) for v in vectors for c in v]
+        offset_locs = []
+        fore_twist_locs = []
+        if len(flat) >= 36:
+            offset_locs = [tuple(flat[i * 3 : i * 3 + 3]) for i in range(8)]
+            fore_twist_locs = [tuple(flat[24 + i * 3 : 24 + i * 3 + 3]) for i in range(4)]
+
+        other_matrix_ixs = list(bone_ixs[8:13])
 
         self._map_bones(bone_ixs, ArmHandsCompressedBones, 15)
 
         return {
             "vectors": vectors,
-            "bone_indices": bone_ixs
+            "offset_locs": offset_locs,
+            "fore_twist_locs": fore_twist_locs,
+            "bone_indices": bone_ixs,
+            "other_matrix_indices": other_matrix_ixs,
         }
 
     def parse_arms_hands_ik(self, f):
         offset_locs = [read_vec3(f) for _ in range(8)]
         fore_twist_locs = [read_vec3(f) for _ in range(4)]
         ik_data = [read_ik_skel_data(f) for _ in range(2)]
-        bone_ixs = struct.unpack('<8I', f.read(32))
-        other_matrix_ixs = struct.unpack('<6I', f.read(24))
+        bone_ixs = struct.unpack('<8i', f.read(32))
+        other_matrix_ixs = struct.unpack('<6i', f.read(24))
         
         self._map_bones(bone_ixs, ArmsHandsIKBones, 8)
         for i, bone_id in enumerate(other_matrix_ixs):
@@ -237,7 +465,7 @@ class NalSkeletonParser:
     def parse_five_finger(self, f):
         vectors = [read_vec4(f) for _ in range(22)]
         aa = struct.unpack('<2f', f.read(8))
-        bone_ixs = struct.unpack('<32I', f.read(128))
+        bone_ixs = struct.unpack('<32i', f.read(128))
         
         self._map_bones(bone_ixs, FingerBones, 30)
 
@@ -350,9 +578,14 @@ def apply_torso_head_chains(skel_data, idx_to_bone, root_eb):
                 
         other_ixs = comp.get("other_matrix_indices")
         if other_ixs:
-            other_id = other_ixs[0]
-            if other_id in idx_to_bone and pelvis_id in idx_to_bone:
-                idx_to_bone[other_id].parent = idx_to_bone[pelvis_id]    
+            other_id = int(other_ixs[0])
+            if (
+                other_id != -1
+                and other_id not in chain
+                and other_id in idx_to_bone
+                and spine2_id in idx_to_bone
+            ):
+                idx_to_bone[other_id].parent = idx_to_bone[spine2_id]
                 
 def apply_leg_chains(skel_data, idx_to_bone):
     pelvis_id = None
@@ -385,7 +618,7 @@ def apply_leg_chains(skel_data, idx_to_bone):
         legs_parent = None
         if pelvis_id is not None and pelvis_id in idx_to_bone:
             legs_parent = idx_to_bone[pelvis_id]
-            
+
         if legs_parent is not None:
             if r_thigh_id in idx_to_bone:
                 idx_to_bone[r_thigh_id].parent = legs_parent
@@ -436,12 +669,20 @@ def apply_arm_chains(skel_data, idx_to_bone):
         l_forearm_id = bone_ixs[ArmsHandsIKBones.L_FOREARM.value]
         r_forearm_id = bone_ixs[ArmsHandsIKBones.R_FOREARM.value]
 
-        if spine2_id is not None and spine2_id in idx_to_bone:
-            spine2_bone = idx_to_bone[spine2_id]
+        other_ixs = comp.get("other_matrix_indices", ())
+        neck_parent_id = other_ixs[4] if len(other_ixs) > 4 else None
+
+        clav_parent = None
+        if neck_parent_id is not None and neck_parent_id in idx_to_bone:
+            clav_parent = idx_to_bone[neck_parent_id]
+        elif spine2_id is not None and spine2_id in idx_to_bone:
+            clav_parent = idx_to_bone[spine2_id]
+
+        if clav_parent is not None:
             if l_clav_id in idx_to_bone:
-                idx_to_bone[l_clav_id].parent = spine2_bone
+                idx_to_bone[l_clav_id].parent = clav_parent
             if r_clav_id in idx_to_bone:
-                idx_to_bone[r_clav_id].parent = spine2_bone
+                idx_to_bone[r_clav_id].parent = clav_parent
 
         chains = [
             (l_clav_id,    l_upper_id),
@@ -457,7 +698,6 @@ def apply_arm_chains(skel_data, idx_to_bone):
             if parent_id in idx_to_bone and child_id in idx_to_bone:
                 idx_to_bone[child_id].parent = idx_to_bone[parent_id]
 
-        other_ixs = comp.get("other_matrix_indices", ())
         if len(other_ixs) >= 4:
             l_twist0_id, l_twist1_id, r_twist0_id, r_twist1_id = other_ixs[:4]
 
@@ -499,10 +739,10 @@ def apply_arm_chains(skel_data, idx_to_bone):
         neck_parent_id = bone_ixs[ArmHandsCompressedBones.NECK_PARENT.value]
 
         clav_parent = None
-        if spine2_id is not None and spine2_id in idx_to_bone:
-            clav_parent = idx_to_bone[spine2_id]
-        elif neck_parent_id in idx_to_bone:
+        if neck_parent_id in idx_to_bone:
             clav_parent = idx_to_bone[neck_parent_id]
+        elif spine2_id is not None and spine2_id in idx_to_bone:
+            clav_parent = idx_to_bone[spine2_id]
 
         if clav_parent is not None:
             if l_clav_id in idx_to_bone:

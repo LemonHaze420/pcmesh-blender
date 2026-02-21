@@ -12,6 +12,8 @@ import bpy
 import sys
 import io
 import os
+import json
+import math
 import mathutils
 
 from pathlib import Path
@@ -25,6 +27,7 @@ from .pcmesh import *
 created_first = False
 requested_pcmesh = ""
 skel_data = {}
+loaded_skel_path = ""
 
 class OT_OpenFileBrowser(bpy.types.Operator):
     bl_idname = "wm.open_pcskel"
