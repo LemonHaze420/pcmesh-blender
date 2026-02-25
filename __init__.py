@@ -582,6 +582,37 @@ def _build_id_to_bone_name(armature_obj, skel_info=None):
             if kid not in id_to_name and v:
                 id_to_name[kid] = str(v)
 
+    try:
+        if armature_obj and armature_obj.data:
+            bones = armature_obj.data.bones
+
+            mapped_root = id_to_name.get(-1)
+            if mapped_root and mapped_root not in bones:
+                mapped_root = None
+
+            if not mapped_root:
+                for root_name in ("ROOT", "Root", "root"):
+                    if root_name in bones:
+                        mapped_root = root_name
+                        break
+
+            if not mapped_root:
+                for b in bones:
+                    if b.parent is None and "root" in b.name.lower():
+                        mapped_root = b.name
+                        break
+
+            if not mapped_root:
+                for b in bones:
+                    if b.parent is None:
+                        mapped_root = b.name
+                        break
+
+            if mapped_root:
+                id_to_name[-1] = mapped_root
+    except Exception:
+        pass
+
     return id_to_name
 
 
@@ -608,6 +639,10 @@ def _quat_mul_wxyz(a, b):
         aw * by - ax * bz + ay * bw + az * bx,
         aw * bz + ax * by - ay * bx + az * bw,
     ))
+
+
+def _quat_dot_wxyz(a, b):
+    return float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])
 
 
 def _apply_bone_tracks_action(armature_obj, action, bone_tracks, id_to_name, normalize_rot_from_first_frame=False):
@@ -660,6 +695,7 @@ def _apply_bone_tracks_action(armature_obj, action, bone_tracks, id_to_name, nor
 
         rot_tracks = tracks.get("rotation", {}) if isinstance(tracks, dict) else {}
         rot_items = sorted(rot_tracks.items(), key=lambda kv: int(kv[0]))
+        prev_q = None
         for frame_no, q in rot_items:
             if not q or len(q) != 4:
                 continue
@@ -667,6 +703,9 @@ def _apply_bone_tracks_action(armature_obj, action, bone_tracks, id_to_name, nor
             qv = _quat_normalize_wxyz((float(q[0]), float(q[1]), float(q[2]), float(q[3])))
             if global_rot_inv is not None:
                 qv = _quat_mul_wxyz(global_rot_inv, qv)
+            if prev_q is not None and _quat_dot_wxyz(prev_q, qv) < 0.0:
+                qv = (-qv[0], -qv[1], -qv[2], -qv[3])
+            prev_q = qv
             pbone.rotation_quaternion = qv
             pbone.keyframe_insert(data_path="rotation_quaternion", frame=fno, group=pbone.name)
             had_keys = True
@@ -684,6 +723,10 @@ def _apply_bone_tracks_action(armature_obj, action, bone_tracks, id_to_name, nor
 
         if had_keys:
             keyed_bones += 1
+
+    for fcurve in action.fcurves:
+        for key in fcurve.keyframe_points:
+            key.interpolation = 'LINEAR'
 
     return keyed_bones
 
@@ -826,6 +869,18 @@ class PCANIMImporter(bpy.types.Operator):
             decoded_components = anim.get("decoded_components", [])
             comp_ids = [int(c.get("comp_ix", -1)) for c in decoded_components]
             action["pcanim_component_ids"] = ",".join(str(i) for i in comp_ids)
+            applied_ids = sorted({
+                int(c.get("comp_ix", -1))
+                for c in decoded_components
+                if str(c.get("apply_mode", "")) == "applied"
+            })
+            noop_ids = sorted({
+                int(c.get("comp_ix", -1))
+                for c in decoded_components
+                if str(c.get("apply_mode", "")) != "applied"
+            })
+            action["pcanim_applied_component_ids"] = ",".join(str(i) for i in applied_ids)
+            action["pcanim_noop_component_ids"] = ",".join(str(i) for i in noop_ids)
             action["pcanim_has_legs_ik"] = bool(6 in comp_ids)
             action["pcanim_has_arms"] = bool(7 in comp_ids)
             action["pcanim_has_arms_ik"] = bool(8 in comp_ids)
@@ -837,6 +892,11 @@ class PCANIMImporter(bpy.types.Operator):
 
             keyed_bones = 0
             bone_tracks = anim.get("bone_tracks", {})
+            root_tracks = bone_tracks.get(-1, {}) if isinstance(bone_tracks, dict) else {}
+            root_rot_count = len(root_tracks.get("rotation", {})) if isinstance(root_tracks, dict) else 0
+            root_loc_count = len(root_tracks.get("location", {})) if isinstance(root_tracks, dict) else 0
+            action["pcanim_root_rot_keys"] = int(root_rot_count)
+            action["pcanim_root_loc_keys"] = int(root_loc_count)
             if isinstance(bone_tracks, dict) and bone_tracks:
                 keyed_bones = _apply_bone_tracks_action(
                     armature_obj=armature_obj,
