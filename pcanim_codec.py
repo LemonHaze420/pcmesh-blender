@@ -94,7 +94,7 @@ def _get_num_tracks_for_comp(comp_ix, mask):
 
 def _get_num_bytes_for_comp(comp_ix, mask):
     if comp_ix in (COMP_ARBITRARY_PO, COMP_GENERIC):
-        return -1
+        return 0
 
     if comp_ix == COMP_FAKEROOT_STD:
         tracks = 9 + _count(mask, 0x1, 6) + _count(mask, 0x2, 1)
@@ -625,6 +625,235 @@ def _dec_f2047(bs):
     return 5, 0
 
 
+def _dec_f15bit(bs):
+    code = bs.peek_bits(9)
+    low3 = code & 7
+
+    if low3 >= 2:
+        if low3 == 7:
+            low3 = ((code >> 3) & 7) + 5
+            high = code >> 6
+            bs.consume(9)
+        else:
+            high = (code >> 3) & 7
+            low3 -= 2
+            bs.consume(6)
+
+        if (high & 4) == 0:
+            high -= 7
+        return 1, high << low3
+
+    bs.consume(5)
+    low5 = code & 0x1F
+    if low5 != 0:
+        return 1, (low5 >> 3) if (low5 & 1) else -(low5 >> 3)
+    return 5, 0
+
+
+def _dec_f23bit(bs):
+    code = bs.peek_bits(10)
+    low3 = code & 7
+
+    if low3 >= 2:
+        if low3 == 7:
+            low3 = ((code >> 3) & 0xF) + 5
+            high = code >> 7
+            bs.consume(10)
+        else:
+            high = (code >> 3) & 7
+            low3 -= 2
+            bs.consume(6)
+
+        if (high & 4) == 0:
+            high -= 7
+        return 1, high << low3
+
+    bs.consume(5)
+    low5 = code & 0x1F
+    if low5 != 0:
+        return 1, (low5 >> 3) if (low5 & 1) else -(low5 >> 3)
+    return 5, 0
+
+
+def _dec_f31bit(bs):
+    code = bs.peek_bits(8)
+    low5 = code & 0x1F
+
+    if low5 == 2:
+        bs.consume(5)
+        return 1, 0
+
+    if low5 >= 2:
+        high = code >> 5
+        shift = low5 - 3
+        if (high & 4) == 0:
+            high -= 7
+        bs.consume(8)
+        return 1, high << shift
+
+    if code & 1:
+        value = ((code >> 5) & 3) + 1
+    else:
+        value = -1 - ((code >> 5) & 3)
+    bs.consume(7)
+    return 1, value
+
+
+def _dec_15(bs):
+    code = bs.read_bits(5)
+    if code != 0:
+        return 1, code - 16
+    return 5, 0
+
+
+def _dec_0_16(bs):
+    code = bs.peek_bits(7)
+    if code & 1:
+        if code & 2:
+            bs.consume(7)
+            return 1, (code >> 6) + (code >> 2) - 16
+        bs.consume(2)
+        return 1, 0
+
+    bs.consume(1)
+    return 4, 0
+
+
+def _dec_0_1_17(bs):
+    code = bs.peek_bits(7)
+    if code & 1:
+        if code & 2:
+            tmp = code >> 2
+            value = tmp - 14 if (tmp & 0x10) else tmp - 17
+            bs.consume(7)
+            return 1, value
+        bs.consume(3)
+        return 1, ((code >> 1) & 2) - 1
+
+    bs.consume(2)
+    if code & 2:
+        return 1, 0
+    return 8, 0
+
+
+def _dec_1_17(bs):
+    code = bs.peek_bits(7)
+    if (code & 3) != 0:
+        bs.consume(2)
+        return 1, (code & 3) - 2
+
+    bs.consume(7)
+    tmp = code >> 2
+    value = tmp - 14 if (tmp & 0x10) else tmp - 17
+    return 1, value
+
+
+def _dec_31(bs):
+    code = bs.read_bits(6)
+    if code != 0:
+        return 1, code - 32
+    return 6, 0
+
+
+def _dec_0_1_33(bs):
+    code = bs.peek_bits(8)
+    if code & 1:
+        if code & 2:
+            tmp = code >> 2
+            value = tmp - 30 if (tmp & 0x20) else tmp - 33
+            bs.consume(8)
+            return 1, value
+        bs.consume(3)
+        return 1, ((code >> 1) & 2) - 1
+
+    bs.consume(2)
+    if code & 2:
+        return 1, 0
+    return 8, 0
+
+
+def _dec_3_35(bs):
+    code = bs.peek_bits(8)
+    low3 = code & 7
+    if low3 < 3:
+        if code & 2:
+            bs.consume(4)
+            return 1, 3 if (code & 8) else -3
+
+        if code & 1:
+            value = (code >> 3) + 4
+        else:
+            value = -4 - (code >> 3)
+        bs.consume(8)
+        return 1, value
+
+    bs.consume(3)
+    return 1, low3 - 5
+
+
+def _dec_63(bs):
+    code = bs.read_bits(7)
+    if code != 0:
+        return 1, code - 64
+    return 7, 0
+
+
+def _dec_127(bs):
+    code = bs.read_bits(8)
+    if code != 0:
+        return 1, code - 128
+    return 8, 0
+
+
+def _dec_255(bs):
+    code = bs.read_bits(9)
+    if code != 0:
+        return 1, code - 256
+    return 8, 0
+
+
+def _dec_511(bs):
+    code = bs.read_bits(10)
+    if code != 0:
+        return 1, code - 512
+    return 8, 0
+
+
+def _dec_1023(bs):
+    code = bs.read_bits(11)
+    if code != 0:
+        return 1, code - 1024
+    return 8, 0
+
+
+def _dec_15bit(bs):
+    code = bs.read_bits(16)
+    if code != 0:
+        return 1, code - 0x8000
+    return 8, 0
+
+
+def _dec_23bit(bs):
+    code = bs.read_bits(24)
+    if code != 0:
+        return 1, code - 0x800000
+    return 8, 0
+
+
+def _dec_31bit(bs):
+    code = bs.read_bits(32)
+    if code == 0x80000000:
+        return 8, 0
+    if code & 0x80000000:
+        code -= 0x100000000
+    return 1, code
+
+
+def _dec_err(bs):
+    del bs
+    return 0, 0
+
+
 DECODER_TABLE = {
     0: _dec_0,
     1: _dec_1a,
@@ -653,6 +882,11 @@ DECODER_TABLE = {
     24: _dec_f127,
     25: _dec_f255,
     26: _dec_f2047,
+    27: _dec_f15bit,
+    28: _dec_f23bit,
+    29: _dec_f31bit,
+    30: _dec_err,
+    31: _dec_err,
     32: _dec_0,
     33: _dec_1a,
     34: _dec_1b,
@@ -668,6 +902,23 @@ DECODER_TABLE = {
     44: _dec_7a,
     45: _dec_7b,
     46: _dec_7c,
+    47: _dec_15,
+    48: _dec_0_16,
+    49: _dec_0_1_17,
+    50: _dec_1_17,
+    51: _dec_31,
+    52: _dec_0_1_33,
+    53: _dec_3_35,
+    54: _dec_63,
+    55: _dec_127,
+    56: _dec_255,
+    57: _dec_511,
+    58: _dec_1023,
+    59: _dec_15bit,
+    60: _dec_23bit,
+    61: _dec_31bit,
+    62: _dec_err,
+    63: _dec_err,
 }
 
 
@@ -910,9 +1161,115 @@ def _integrate_for_frame_ik(tracks, codec_ixs, mask, frame, dec, time_scale, is_
         track_ix += 7
 
 
+def _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    del mask
+    scaled_quant = DEQUANT_SCALE * float(time_scale)
+    _dequant_tracks(tracks, codec_ixs, dec, frame, scaled_quant, is_scene_anim)
+
+    if frame == 0:
+        return
+
+    for t in tracks:
+        if frame == 1:
+            t.whole += t.delta
+        else:
+            d = t.sec_delta + t.delta
+            t.delta = d
+            t.whole += d
+
+
+def _integrate_for_frame_noop(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    del tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim
+
+
+def _integrate_for_frame_torso_head(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_torso(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_torso_head_std(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_torso(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_legs(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_quat_masked(
+        tracks,
+        codec_ixs,
+        mask,
+        frame,
+        dec,
+        time_scale,
+        is_scene_anim,
+        bit_count=8,
+    )
+
+
+def _integrate_for_frame_arms(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_quat_masked(
+        tracks,
+        codec_ixs,
+        mask,
+        frame,
+        dec,
+        time_scale,
+        is_scene_anim,
+        bit_count=8,
+    )
+
+
+def _integrate_for_frame_legs_ik(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_ik(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_arms_ik(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_ik(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_tentacle(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_fing52(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_fing5_curl(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_fing5_reduced(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+def _integrate_for_frame_fing5(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim)
+
+
+_INTEGRATOR_BY_COMPONENT = {
+    COMP_ARBITRARY_PO: _integrate_for_frame_noop,
+    COMP_GENERIC: _integrate_for_frame_noop,
+    COMP_FAKEROOT_STD: _integrate_for_frame_fakeroot,
+    COMP_TORSO_HEAD: _integrate_for_frame_torso_head,
+    COMP_TORSO_HEAD_STD: _integrate_for_frame_torso_head_std,
+    COMP_LEGS: _integrate_for_frame_legs,
+    COMP_LEGS_IK: _integrate_for_frame_legs_ik,
+    COMP_ARMS: _integrate_for_frame_arms,
+    COMP_ARMS_IK: _integrate_for_frame_arms_ik,
+    COMP_TENTACLE: _integrate_for_frame_tentacle,
+    COMP_FING52: _integrate_for_frame_fing52,
+    COMP_FING5_CURL: _integrate_for_frame_fing5_curl,
+    COMP_FING5_REDUCED: _integrate_for_frame_fing5_reduced,
+    COMP_FING5: _integrate_for_frame_fing5,
+}
+
+
 def _decode_component_frames(comp_ix, codec_ixs, encoded_data, mask, frame_count, current_time, is_scene_anim):
     if frame_count <= 0:
         return []
+
+    integrator = _INTEGRATOR_BY_COMPONENT.get(int(comp_ix))
+    if integrator is None:
+        raise PCANIMCodecError(f"No integrator for component {int(comp_ix)}")
+
     if not codec_ixs:
         return [[] for _ in range(frame_count)]
 
@@ -921,23 +1278,6 @@ def _decode_component_frames(comp_ix, codec_ixs, encoded_data, mask, frame_count
 
     out = []
     for frame in range(frame_count):
-        if comp_ix in (COMP_LEGS_IK, COMP_ARMS_IK):
-            _integrate_for_frame_ik(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim)
-        elif comp_ix in (COMP_LEGS, COMP_ARMS):
-            _integrate_for_frame_quat_masked(
-                tracks,
-                codec_ixs,
-                mask,
-                frame,
-                dec,
-                current_time,
-                is_scene_anim,
-                bit_count=8,
-            )
-        elif comp_ix == COMP_FAKEROOT_STD:
-            _integrate_for_frame_fakeroot(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim)
-        else:
-            _integrate_for_frame_torso(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim)
+        integrator(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim)
         out.append([float(t.whole) for t in tracks])
     return out
-
