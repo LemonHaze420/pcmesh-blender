@@ -776,3 +776,95 @@ struct FiveFinger_Top2KnuckleCurl {
 };
 
 
+
+
+
+
+
+inline void DebugPrintVector3(const vector3& v, const char* name)
+{
+    printf("  %s : (%f, %f, %f)\n", name, v.v[0], v.v[1], v.v[2]);
+}
+
+inline void DebugPrintQuat(const quat& q, const char* name)
+{
+    printf("  %s : (%f, %f, %f, %f)\n",
+        name, q.v[0], q.v[1], q.v[2], q.v[3]);
+}
+inline void DebugPrintLegsPose(const LegsPose& p, const char* prefix = "LegsPose")
+{
+    DebugPrintQuat(p.l_toe, "l_toe");
+    DebugPrintQuat(p.r_toe, "r_toe");
+    DebugPrintQuat(p.l_foot, "l_foot");
+    DebugPrintQuat(p.r_foot, "r_foot");
+}
+inline void DebugPrintLegsIKPose(const LegsIKPose& p, const char* prefix = "LegsIKPose")
+{
+    DebugPrintQuat(p.leftFootQuatTrack, "leftFootQuatTrack");
+    DebugPrintQuat(p.rightFootQuatTrack, "rightFootQuatTrack");
+    DebugPrintQuat(p.leftFootTrack, "leftFootTrack");
+    DebugPrintQuat(p.rightFootTrack, "rightFootTrack");
+
+    DebugPrintVector3(p.leftFootPos, "leftFootPos");
+    DebugPrintVector3(p.rightFootPos, "rightFootPos");
+
+    printf("  f_LKneeSpin : %f\n", p.f_LKneeSpin);
+    printf("  f_RKneeSpin : %f\n", p.f_RKneeSpin);
+}
+inline void DebugPrintArmsPose(const ArmsPose& p, const char* prefix = "ArmsPose")
+{
+    DebugPrintQuat(p.l_clav, "l_clav");
+    DebugPrintQuat(p.l_upperarm, "l_upperarm");
+    DebugPrintQuat(p.l_forearm, "l_forearm");
+    DebugPrintQuat(p.l_hand, "l_hand");
+
+    DebugPrintQuat(p.r_clav, "r_clav");
+    DebugPrintQuat(p.r_upperarm, "r_upperarm");
+    DebugPrintQuat(p.r_forearm, "r_forearm");
+    DebugPrintQuat(p.r_hand, "r_hand");
+}
+inline void DebugPrintComponentPose(const ComponentPose& cp)
+{
+    printf("%s:\n", component_to_string(cp.type).data());
+
+    std::visit([&](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+
+        if constexpr (std::is_same_v<T, std::monostate>) {
+            printf("  [no pose stored]\n");
+        }
+        else if constexpr (std::is_same_v<T, TorsoHeadPose>) {
+            DebugPrintQuat(arg.spine, "spine");
+            DebugPrintQuat(arg.spine1, "spine1");
+            DebugPrintQuat(arg.spine2, "spine2");
+            DebugPrintQuat(arg.neck, "neck");
+            DebugPrintQuat(arg.head, "head");
+            DebugPrintQuat(arg.pelvisOrient, "pelvisOrient");
+            DebugPrintVector3(arg.pelvisPos, "pelvisPos");
+        }
+        else if constexpr (std::is_same_v<T, LegsPose>) {
+            DebugPrintLegsPose(arg);
+        }
+        else if constexpr (std::is_same_v<T, LegsIKPose>) {
+            DebugPrintLegsIKPose(arg);
+        }
+        else if constexpr (std::is_same_v<T, ArmsPose>) {
+            DebugPrintArmsPose(arg);
+        }
+        else if constexpr (std::is_same_v<T, ArmStdPose>) {
+            // todo
+        }
+        else if constexpr (std::is_same_v<T, Fing5KnuckCurlPose>) {
+            DebugPrintQuat(arg.quatTracks[0], "l_finger");
+            DebugPrintQuat(arg.quatTracks[1], "r_finger");
+        }
+        else if constexpr (std::is_same_v<T, FakerootPose>) {
+            DebugPrintQuat(arg.fakerootOrient, "fakerootOrient");
+            DebugPrintVector3(arg.pos, "pos");
+            printf("  floorOffset : %f\n", arg.floorOffset);
+        }
+        else {
+            printf("  [unhandled pose type in visitor]\n");
+        }
+        }, cp.pose);
+}

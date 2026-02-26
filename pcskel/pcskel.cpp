@@ -311,7 +311,6 @@ public:
 								cp.pose = p;
 								break;
 							}
-
 							default:
 							{
 								if (floats.size_bytes() > 0)
@@ -323,6 +322,9 @@ public:
 					}
 				}
 
+				for (const auto& cp : poses) {
+					DebugPrintComponentPose(cp);
+				}
 			}
 		}
 		skel.close();
