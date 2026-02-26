@@ -122,12 +122,25 @@ class NalSkeletonParser:
             })
 
             component_meta = []
+            component_records = {}
 
             if num_components > 0 and components_offs > 0:
                 f.seek(components_offs)
-                for _ in range(num_components):
+                for slot_ix in range(num_components):
                     c_idx, c_type, c_flags = struct.unpack('<iIi', f.read(12))
                     component_meta.append({'index': c_idx, 'type': c_type, 'flags': c_flags})
+
+                    type_name = "Unknown"
+                    if c_type in list(NalComponentType):
+                        type_name = NalComponentType(c_type).name
+
+                    component_records[int(slot_ix)] = {
+                        "component_index": int(slot_ix),
+                        "component_name_id": int(c_idx),
+                        "component_flags": int(c_flags),
+                        "type_id": int(c_type),
+                        "type_name": type_name,
+                    }
 
             self.result["component_meta"] = component_meta
 
@@ -162,17 +175,33 @@ class NalSkeletonParser:
                             data = self.parse_arms_hands_compressed(f)
                         elif comp_type == NalComponentType.ArmsHands_IK_Compressed:
                             data = self.parse_arms_hands_ik(f)
+                        elif comp_type == NalComponentType.LegsFeet_Compressed:
+                            data = self.parse_legs_compressed(f)
                         elif comp_type == NalComponentType.FiveFinger_Top2KnuckleCurl:
                             data = self.parse_five_finger(f)
+                        elif comp_type in (
+                            NalComponentType.FiveFinger_IndividualCurl,
+                            NalComponentType.FiveFinger_ReducedAngular,
+                            NalComponentType.FiveFinger_FullRotational,
+                        ):
+                            data = self.parse_five_finger(f)
+                        elif comp_type == NalComponentType.FakerootEntropyCompressed:
+                            data = self.parse_fakeroot_per_skel(f)
+                        elif comp_type == NalComponentType.Tentacles_Compressed:
+                            data = self.parse_tentacles_per_skel(f)
                         elif comp_type == NalComponentType.ArbitraryPO:
                             data = self.parse_arbitrary_po(f, comp_block_start)
-                        
+
                         if data:
-                            data["component_index"] = int(comp_idx)
-                            data["component_flags"] = int(meta["flags"])
-                            data["type_id"] = comp_type
-                            data["type_name"] = NalComponentType(comp_type).name if comp_type in list(NalComponentType) else "Unknown"
-                            self.result["components"].append(data)
+                            rec = component_records.get(int(comp_idx), {
+                                "component_index": int(comp_idx),
+                                "component_name_id": int(meta.get("index", comp_idx)),
+                                "component_flags": int(meta.get("flags", 0)),
+                                "type_id": int(comp_type),
+                                "type_name": NalComponentType(comp_type).name if comp_type in list(NalComponentType) else "Unknown",
+                            })
+                            rec.update(data)
+                            component_records[int(comp_idx)] = rec
 
             if default_pose_offsets_offs > 0 and num_components > 0:
                 try:
@@ -210,12 +239,24 @@ class NalSkeletonParser:
                             )
                             self.result["default_poses"] = default_poses
 
-                            for comp in self.result["components"]:
-                                cix = int(comp.get("component_index", -1))
-                                if cix in default_poses:
-                                    comp["default_pose"] = default_poses[cix]
+                            for cix, pose in default_poses.items():
+                                rec = component_records.get(int(cix), {
+                                    "component_index": int(cix),
+                                    "component_name_id": -1,
+                                    "component_flags": 0,
+                                    "type_id": int(pose.get("component_type", 0)),
+                                    "type_name": "Unknown",
+                                })
+                                rec["default_pose"] = pose
+                                component_records[int(cix)] = rec
                 except Exception:
                     pass
+
+            if component_records:
+                self.result["components"] = [
+                    component_records[idx]
+                    for idx in sorted(component_records.keys())
+                ]
 
         return self.result
 
@@ -317,6 +358,57 @@ class NalSkeletonParser:
                 'num_signals': int(sig_count),
             }
 
+        if comp_type == int(NalComponentType.Tentacles_Compressed):
+            if len(pose_bytes) < 60:
+                return None
+            vals = struct.unpack('<15f', pose_bytes[:60])
+            return {
+                'kind': 'tentacles_pose',
+                'values': [float(v) for v in vals],
+            }
+
+        if comp_type == int(NalComponentType.FiveFinger_Top2KnuckleCurl):
+            if len(pose_bytes) < 192:
+                return None
+            quats = unpack_quat_list(pose_bytes, 9)
+            other = struct.unpack('<10f', pose_bytes[144:184])
+            available_tracks = struct.unpack('<I', pose_bytes[184:188])[0]
+            return {
+                'kind': 'fing52_pose',
+                'quats': quats,
+                'other_tracks': [float(v) for v in other],
+                'available_tracks': int(available_tracks),
+            }
+
+        if comp_type == int(NalComponentType.FiveFinger_ReducedAngular):
+            if len(pose_bytes) < 176:
+                return None
+            quats = unpack_quat_list(pose_bytes, 11)
+            return {
+                'kind': 'fing5_reduced_pose',
+                'quats': quats,
+            }
+
+        if comp_type == int(NalComponentType.FiveFinger_IndividualCurl):
+            if len(pose_bytes) < 112:
+                return None
+            quats = unpack_quat_list(pose_bytes, 4)
+            curls = struct.unpack('<10f', pose_bytes[64:104])
+            return {
+                'kind': 'fing5_curl_pose',
+                'quats': quats,
+                'finger_curl': [float(v) for v in curls],
+            }
+
+        if comp_type == int(NalComponentType.FiveFinger_FullRotational):
+            if len(pose_bytes) < 480:
+                return None
+            quats = unpack_quat_list(pose_bytes, 30)
+            return {
+                'kind': 'fing5_full_pose',
+                'quats': quats,
+            }
+
         return None
 
     def _parse_default_poses(self, component_meta, pose_offsets, pose_blob):
@@ -330,6 +422,7 @@ class NalSkeletonParser:
                 int(NalComponentType.ArmsHands_Compressed): 128,
                 int(NalComponentType.ArmsHands_IK_Compressed): 96,
                 int(NalComponentType.FakerootEntropyCompressed): 48,
+                int(NalComponentType.Tentacles_Compressed): 60,
                 int(NalComponentType.FiveFinger_Top2KnuckleCurl): 192,
                 int(NalComponentType.FiveFinger_ReducedAngular): 176,
                 int(NalComponentType.FiveFinger_IndividualCurl): 112,
@@ -416,6 +509,26 @@ class NalSkeletonParser:
             "other_matrix_indices": [other_matrix_ixs]
         }
 
+    def parse_legs_compressed(self, f):
+        vectors = [read_vec4(f) for _ in range(9)]
+        bone_ixs = struct.unpack('<9i', f.read(36))
+
+        flat = [float(c) for v in vectors for c in v]
+        offset_locs = []
+        if len(flat) >= 24:
+            offset_locs = [tuple(flat[i * 3 : i * 3 + 3]) for i in range(8)]
+
+        other_matrix_ixs = [int(bone_ixs[8])] if len(bone_ixs) >= 9 else []
+
+        self._map_bones(bone_ixs, LegsBones, 9)
+
+        return {
+            "vectors": vectors,
+            "offset_locs": offset_locs,
+            "bone_indices": bone_ixs,
+            "other_matrix_indices": other_matrix_ixs,
+        }
+
     def parse_arms_hands_compressed(self, f):
         vectors = [read_vec4(f) for _ in range(9)]
         bone_ixs = struct.unpack('<16i', f.read(64))
@@ -429,7 +542,7 @@ class NalSkeletonParser:
 
         other_matrix_ixs = list(bone_ixs[8:13])
 
-        self._map_bones(bone_ixs, ArmHandsCompressedBones, 15)
+        self._map_bones(bone_ixs, ArmHandsCompressedBones, 13)
 
         return {
             "vectors": vectors,
@@ -467,13 +580,35 @@ class NalSkeletonParser:
         vectors = [read_vec4(f) for _ in range(22)]
         aa = struct.unpack('<2f', f.read(8))
         bone_ixs = struct.unpack('<32i', f.read(128))
+
+        flat = [float(c) for v in vectors for c in v]
+        flat.extend((float(aa[0]), float(aa[1])))
+        offset_locs = []
+        if len(flat) >= 90:
+            offset_locs = [tuple(flat[i * 3 : i * 3 + 3]) for i in range(30)]
+
+        other_matrix_ixs = list(bone_ixs[30:32])
         
         self._map_bones(bone_ixs, FingerBones, 30)
 
         return {
             "vectors": vectors,
             "aa": aa,
-            "bone_indices": bone_ixs
+            "offset_locs": offset_locs,
+            "bone_indices": bone_ixs,
+            "other_matrix_indices": other_matrix_ixs,
+        }
+
+    def parse_fakeroot_per_skel(self, f):
+        del f
+        return {
+            "per_skel_present": True,
+        }
+
+    def parse_tentacles_per_skel(self, f):
+        del f
+        return {
+            "per_skel_present": True,
         }
 
     def parse_arbitrary_po(self, f, block_start):
@@ -582,11 +717,12 @@ def apply_torso_head_chains(skel_data, idx_to_bone, root_eb):
             other_id = int(other_ixs[0])
             if (
                 other_id != -1
-                and other_id not in chain
                 and other_id in idx_to_bone
                 and spine2_id in idx_to_bone
             ):
                 idx_to_bone[other_id].parent = idx_to_bone[spine2_id]
+                if t == NalComponentType.TorsoHead_TwoNeck_Compressed and neck_id in idx_to_bone:
+                    idx_to_bone[neck_id].parent = idx_to_bone[other_id]
                 
 def apply_leg_chains(skel_data, idx_to_bone):
     pelvis_id = None
@@ -600,9 +736,12 @@ def apply_leg_chains(skel_data, idx_to_bone):
             pelvis_id = bone_ixs[TorsoHeadBones.PELVIS.value]
             break
 
+    has_legs_ik = False
     for comp in skel_data.get("components", []):
         if comp.get("type_id") != NalComponentType.LegsFeet_IK_Compressed:
             continue
+
+        has_legs_ik = True
 
         bone_ixs = comp["bone_indices"]
 
@@ -627,6 +766,50 @@ def apply_leg_chains(skel_data, idx_to_bone):
                 idx_to_bone[l_thigh_id].parent = legs_parent
 
         # thigh to calf -> foot -> toe
+        chains = [
+            (l_thigh_id, l_calf_id),
+            (l_calf_id,  l_foot_id),
+            (l_foot_id,  l_toe_id),
+
+            (r_thigh_id, r_calf_id),
+            (r_calf_id,  r_foot_id),
+            (r_foot_id,  r_toe_id),
+        ]
+
+        for parent_id, child_id in chains:
+            if parent_id in idx_to_bone and child_id in idx_to_bone:
+                idx_to_bone[child_id].parent = idx_to_bone[parent_id]
+
+    if has_legs_ik:
+        return
+
+    for comp in skel_data.get("components", []):
+        if comp.get("type_id") != NalComponentType.LegsFeet_Compressed:
+            continue
+
+        bone_ixs = comp.get("bone_indices", ())
+        if len(bone_ixs) < 8:
+            continue
+
+        l_toe_id   = bone_ixs[LegsBones.L_TOE.value]
+        r_toe_id   = bone_ixs[LegsBones.R_TOE.value]
+        l_foot_id  = bone_ixs[LegsBones.L_FOOT.value]
+        r_foot_id  = bone_ixs[LegsBones.R_FOOT.value]
+        l_thigh_id = bone_ixs[LegsBones.L_THIGH.value]
+        l_calf_id  = bone_ixs[LegsBones.L_CALF.value]
+        r_thigh_id = bone_ixs[LegsBones.R_THIGH.value]
+        r_calf_id  = bone_ixs[LegsBones.R_CALF.value]
+
+        legs_parent = None
+        if pelvis_id is not None and pelvis_id in idx_to_bone:
+            legs_parent = idx_to_bone[pelvis_id]
+
+        if legs_parent is not None:
+            if r_thigh_id in idx_to_bone:
+                idx_to_bone[r_thigh_id].parent = legs_parent
+            if l_thigh_id in idx_to_bone:
+                idx_to_bone[l_thigh_id].parent = legs_parent
+
         chains = [
             (l_thigh_id, l_calf_id),
             (l_calf_id,  l_foot_id),
@@ -779,7 +962,12 @@ def apply_arm_chains(skel_data, idx_to_bone):
       
 def apply_finger_chains(skel_data, idx_to_bone):
     for comp in skel_data.get("components", []):
-        if comp.get("type_id") != NalComponentType.FiveFinger_Top2KnuckleCurl:
+        if comp.get("type_id") not in (
+            NalComponentType.FiveFinger_Top2KnuckleCurl,
+            NalComponentType.FiveFinger_IndividualCurl,
+            NalComponentType.FiveFinger_ReducedAngular,
+            NalComponentType.FiveFinger_FullRotational,
+        ):
             continue
 
         bone_ixs = comp["bone_indices"]
