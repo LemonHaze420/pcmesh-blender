@@ -72,8 +72,37 @@ def import_pcmesh(pcmesh_path, skel_path=None):
         skel_data = open_pcskel(skel_path)
         print(f"Loaded {skel_data['header']['name']}")
 
+    created_meshes = []
     for mesh_data in read_meshfile(pcmesh_path):
-        create_mesh(pcmesh_path, mesh_data)
+        obj = create_mesh(pcmesh_path, mesh_data)
+        if obj is not None:
+            created_meshes.append(obj)
+
+    if len(created_meshes) <= 1:
+        return
+
+    keep = set()
+    first_mesh = created_meshes[0]
+    keep.add(first_mesh)
+    first_arm = first_mesh.parent if first_mesh.parent and first_mesh.parent.type == 'ARMATURE' else None
+    if first_arm is not None:
+        keep.add(first_arm)
+
+    def hide(obj):
+        try:
+            obj.hide_set(True)
+            obj.hide_viewport = True
+            obj.hide_render = True
+        except Exception:
+            pass
+
+    for mesh_obj in created_meshes[1:]:
+        if mesh_obj in keep:
+            continue
+        hide(mesh_obj)
+        arm_obj = mesh_obj.parent if mesh_obj.parent and mesh_obj.parent.type == 'ARMATURE' else None
+        if arm_obj is not None and arm_obj not in keep:
+            hide(arm_obj)
 
 
 def create_faces_from_indices(indices, primitive_type):
