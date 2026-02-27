@@ -865,6 +865,7 @@ class PCANIMImporter(bpy.types.Operator):
 
         created = 0
         decoded_actions = 0
+        metadata_only_actions = 0
         max_end = 1
         first_action = None
         source_name = os.path.basename(self.filepath)
