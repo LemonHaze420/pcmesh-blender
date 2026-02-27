@@ -953,7 +953,14 @@ class PCANIMImporter(bpy.types.Operator):
                 arm_obj.animation_data.action = first_action
 
         context.scene.frame_start = 1
-        context.scene.frame_end = max(context.scene.frame_end, max_end)
+        if first_action is not None:
+            try:
+                active_end = int(round(float(first_action.frame_range[1])))
+            except Exception:
+                active_end = int(first_action.get("pcanim_frame_count", max_end))
+            context.scene.frame_end = max(1, active_end)
+        else:
+            context.scene.frame_end = max(1, int(max_end))
 
         total_decode_warnings = len(parsed.get("decode_warnings", []))
         opts = (
