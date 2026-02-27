@@ -793,7 +793,7 @@ class PCANIMImporter(bpy.types.Operator):
     filter_glob: bpy.props.StringProperty(default="*.PCANIM;*.pcanim", options={'HIDDEN'})
     apply_root_motion: bpy.props.BoolProperty(
         name="Apply Root Motion",
-        description="Apply decoded pelvis/root translation tracks (pelvis rotation is always applied for torso pose fidelity)",
+        description="Apply synthetic root motion tracks from fakeroot (pelvis pose translation/rotation is always applied)",
         default=False,
     )
     normalize_rot_from_first_frame: bpy.props.BoolProperty(
@@ -970,9 +970,9 @@ class PCANIMImporter(bpy.types.Operator):
             f"full_arm_tracks={int(bool(self.use_full_arm_tracks))}"
         )
         if total_decode_warnings > 0:
-            self.report({'WARNING'}, f"Imported {created} animations ({decoded_actions} with decoded tracks), {total_decode_warnings} decode warnings, applied to {len(target_armatures)} armatures [{opts}]")
+            self.report({'WARNING'}, f"Imported {created} animations ({decoded_actions} with keyed tracks, {metadata_only_actions} metadata-only), {total_decode_warnings} decode warnings, applied to {len(target_armatures)} armatures [{opts}]")
         else:
-            self.report({'INFO'}, f"Imported {created} animations ({decoded_actions} with decoded tracks), applied to {len(target_armatures)} armatures [{opts}]")
+            self.report({'INFO'}, f"Imported {created} animations ({decoded_actions} with keyed tracks, {metadata_only_actions} metadata-only), applied to {len(target_armatures)} armatures [{opts}]")
         return {'FINISHED'}
 
     def invoke(self, context, event):
