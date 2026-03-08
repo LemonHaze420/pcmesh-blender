@@ -1188,13 +1188,32 @@ class PCANIMImporter(bpy.types.Operator):
             action["pcanim_noop_component_ids"] = ",".join(str(i) for i in noop_ids)
 
             tentacle_control_frames = 0
+            tentacle_visualized_bones = set()
+            tentacle_apply_mode = ""
             for c in decoded_components:
                 if int(c.get("comp_ix", -1)) != 9:
                     continue
                 controls = c.get("tentacle_controls", {})
                 if isinstance(controls, dict):
                     tentacle_control_frames = max(tentacle_control_frames, int(len(controls)))
+                visualized = c.get("tentacle_visualized_bones", ())
+                if isinstance(visualized, (list, tuple, set)):
+                    for bone_id in visualized:
+                        try:
+                            bid = int(bone_id)
+                        except Exception:
+                            continue
+                        if bid >= 0:
+                            tentacle_visualized_bones.add(bid)
+                notes = c.get("apply_notes", ())
+                if isinstance(notes, list) and "tentacle_heuristic_bone_visualization" in notes:
+                    tentacle_apply_mode = "heuristic_bone_visualization"
             action["pcanim_tentacle_control_frames"] = int(tentacle_control_frames)
+            action["pcanim_tentacle_visualized_bones"] = int(len(tentacle_visualized_bones))
+            if not tentacle_apply_mode and tentacle_control_frames > 0:
+                tentacle_apply_mode = "controls_only_metadata"
+            if tentacle_apply_mode:
+                action["pcanim_tentacle_apply_mode"] = tentacle_apply_mode
 
             decode_warnings = anim.get("decode_warnings", [])
             if decode_warnings:
@@ -1452,6 +1471,11 @@ class PCMESHPTPCANIMTools(bpy.types.Panel):
             anim_box.label(text=f"Frames: {frame_count}  Duration: {duration:.3f}s")
             anim_box.label(text=f"Version: {int(action.get('pcanim_version', 0))}  Skeleton Index: {int(action.get('pcanim_skel_index', -1))}")
             anim_box.label(text=f"Loop: {bool(action.get('pcanim_loop', False))}  Scene: {bool(action.get('pcanim_scene_anim', False))}")
+            generic_fps = float(action.get("pcanim_generic_fps", 0.0))
+            generic_chunk_count = int(action.get("pcanim_generic_chunk_count", 0))
+            if generic_fps > 0.0 or generic_chunk_count > 0:
+                anim_box.label(text=f"Generic FPS: {generic_fps:.3f}  Chunks: {generic_chunk_count}  Frames/Chunk: {int(action.get('pcanim_generic_frames_per_chunk', 0))}")
+                anim_box.label(text=f"Generic Frame Stride: {int(action.get('pcanim_generic_frame_stride', 0))}")
 
             component_ids = _csv_ints(action.get("pcanim_component_ids", ""))
             applied_ids = _csv_ints(action.get("pcanim_applied_component_ids", ""))
@@ -1460,8 +1484,15 @@ class PCMESHPTPCANIMTools(bpy.types.Panel):
             anim_box.label(text=f"Keyed Bones: {int(action.get('pcanim_keyed_bones', 0))}  Warnings: {int(action.get('pcanim_decode_warning_count', 0))}")
 
             tentacle_frames = int(action.get("pcanim_tentacle_control_frames", 0))
+            tentacle_visualized_bones = int(action.get("pcanim_tentacle_visualized_bones", 0))
             if tentacle_frames > 0:
-                anim_box.label(text=f"Tentacle Control Frames: {tentacle_frames}")
+                tentacle_label = f"Tentacle Control Frames: {tentacle_frames}"
+                if tentacle_visualized_bones > 0:
+                    tentacle_label += f"  Visualized Bones: {tentacle_visualized_bones}"
+                anim_box.label(text=tentacle_label)
+                tentacle_mode = str(action.get("pcanim_tentacle_apply_mode", "")).strip()
+                if tentacle_mode:
+                    anim_box.label(text=f"Tentacle Mode: {tentacle_mode}")
 
             if bool(action.get("pcanim_rest_pose_fallback", False)):
                 anim_box.label(text="Rest Pose Fallback: yes")
