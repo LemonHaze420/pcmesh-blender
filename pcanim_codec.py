@@ -48,9 +48,10 @@ def _get_num_tracks(mask):
 
 
 def _get_num_tracks_for_comp(comp_ix, mask):
-    if comp_ix in (COMP_ARBITRARY_PO, COMP_GENERIC):
+    if comp_ix == COMP_ARBITRARY_PO:
+        return 3 * _popcount(mask & 0xFFFF)
+    if comp_ix == COMP_GENERIC:
         return 0
-
     if comp_ix == COMP_FAKEROOT_STD:
         tracks = 9
         if mask & 0x1:
@@ -93,9 +94,10 @@ def _get_num_tracks_for_comp(comp_ix, mask):
 
 
 def _get_num_bytes_for_comp(comp_ix, mask):
-    if comp_ix in (COMP_ARBITRARY_PO, COMP_GENERIC):
+    if comp_ix == COMP_ARBITRARY_PO:
+        return _to_bytes(_get_num_tracks_for_comp(comp_ix, mask))
+    if comp_ix == COMP_GENERIC:
         return 0
-
     if comp_ix == COMP_FAKEROOT_STD:
         tracks = 9 + _count(mask, 0x1, 6) + _count(mask, 0x2, 1)
         return _to_bytes(tracks)
@@ -1178,6 +1180,34 @@ def _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale,
             t.whole += d
 
 
+def _integrate_for_frame_arbitrary(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+    scaled_quant = DEQUANT_SCALE * float(time_scale)
+    _dequant_tracks(tracks, codec_ixs, dec, frame, scaled_quant, is_scene_anim)
+
+    if frame == 0:
+        return
+
+    track_ix = 0
+    for bit in range(16):
+        if (mask & (1 << bit)) == 0:
+            continue
+        if bit < 12:
+            if frame == 1:
+                _reconstruct_quat_initial(tracks, track_ix)
+            else:
+                _apply_quat_delta_accum(tracks, track_ix)
+        else:
+            for j in range(3):
+                t = tracks[track_ix + j]
+                if frame == 1:
+                    t.whole += t.delta
+                else:
+                    d = t.sec_delta + t.delta
+                    t.delta = d
+                    t.whole += d
+        track_ix += 3
+
+
 def _integrate_for_frame_noop(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
     del tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim
 
@@ -1245,7 +1275,7 @@ def _integrate_for_frame_fing5(tracks, codec_ixs, mask, frame, dec, time_scale, 
 
 
 _INTEGRATOR_BY_COMPONENT = {
-    COMP_ARBITRARY_PO: _integrate_for_frame_noop,
+    COMP_ARBITRARY_PO: _integrate_for_frame_arbitrary,
     COMP_GENERIC: _integrate_for_frame_noop,
     COMP_FAKEROOT_STD: _integrate_for_frame_fakeroot,
     COMP_TORSO_HEAD: _integrate_for_frame_torso_head,

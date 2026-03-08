@@ -334,6 +334,35 @@ def _components_to_bone_tracks(
     )
 
     arbitrary_nodes = list(arbitrary_comp.get("nodes", ())) if arbitrary_comp else []
+    arbitrary_quat_track_count = int(arbitrary_comp.get("quat_track_count", 0)) if arbitrary_comp else 0
+    arbitrary_vector_track_count = int(arbitrary_comp.get("vector_track_count", 0)) if arbitrary_comp else 0
+    arbitrary_node_order = list(arbitrary_comp.get("node_order", ())) if arbitrary_comp else []
+    arbitrary_skel_quats = [
+        _quat_normalize_wxyz(tuple(float(v) for v in q))
+        for q in (arbitrary_comp.get("per_skel_quats", ()) if arbitrary_comp else ())
+        if q and len(q) == 4
+    ]
+    arbitrary_skel_positions = [
+        tuple(float(v) for v in p)
+        for p in (arbitrary_comp.get("per_skel_positions", ()) if arbitrary_comp else ())
+        if p and len(p) == 3
+    ]
+    arbitrary_default = (arbitrary_comp or {}).get("default_pose", {})
+    arbitrary_default_quats = list(arbitrary_default.get("quats", ()))
+    arbitrary_default_positions = [
+        tuple(float(v) for v in p)
+        for p in arbitrary_default.get("positions", ())
+        if p and len(p) == 3
+    ]
+    arbitrary_state_quats = [
+        _quat_normalize_wxyz(arbitrary_default_quats[i]) if i < len(arbitrary_default_quats) else _id_quat()
+        for i in range(max(arbitrary_quat_track_count, len(arbitrary_default_quats)))
+    ]
+    arbitrary_state_positions = [
+        arbitrary_default_positions[i] if i < len(arbitrary_default_positions) else (0.0, 0.0, 0.0)
+        for i in range(max(arbitrary_vector_track_count, len(arbitrary_default_positions)))
+    ]
+
 
     torso_bones = list(torso_comp.get("bone_indices", ())) if torso_comp else []
     torso_type_id = int(torso_comp.get("type_id", 0)) if torso_comp else 0
@@ -432,6 +461,64 @@ def _components_to_bone_tracks(
             frame_no,
             _engine_to_blender_quat_wxyz(q_local),
         )
+
+    def _build_arbitrary_component_world(frame_mats):
+        if not arbitrary_nodes:
+            return {}
+
+        ordered_nodes = []
+        seen_node_indices = set()
+        if arbitrary_node_order and len(arbitrary_node_order) == len(arbitrary_nodes):
+            for raw_idx in arbitrary_node_order:
+                try:
+                    node_idx = int(raw_idx)
+                except Exception:
+                    continue
+                if node_idx < 0 or node_idx >= len(arbitrary_nodes) or node_idx in seen_node_indices:
+                    continue
+                ordered_nodes.append(arbitrary_nodes[node_idx])
+                seen_node_indices.add(node_idx)
+        if len(ordered_nodes) != len(arbitrary_nodes):
+            for node_idx, node in enumerate(arbitrary_nodes):
+                if node_idx in seen_node_indices:
+                    continue
+                ordered_nodes.append(node)
+
+        comp_world = {}
+        for node in ordered_nodes:
+            bid = int(node.get("id", -1))
+            if bid < 0:
+                continue
+
+            quat_ix = int(node.get("quat_index", -1))
+            pos_ix = int(node.get("pos_index", -1))
+            use_std_pose_quat = bool(node.get("use_std_pose_quat", False))
+            use_std_pose_pos = bool(node.get("use_std_pose_pos", False))
+
+            if use_std_pose_quat and 0 <= quat_ix < len(arbitrary_state_quats):
+                quat = arbitrary_state_quats[quat_ix]
+            elif 0 <= quat_ix < len(arbitrary_skel_quats):
+                quat = arbitrary_skel_quats[quat_ix]
+            else:
+                quat = _id_quat()
+
+            if use_std_pose_pos and 0 <= pos_ix < len(arbitrary_state_positions):
+                pos = arbitrary_state_positions[pos_ix]
+            elif 0 <= pos_ix < len(arbitrary_skel_positions):
+                pos = arbitrary_skel_positions[pos_ix]
+            else:
+                pos = (0.0, 0.0, 0.0)
+
+            local = _mat_from_quat_pos(quat, pos)
+            parent_id = int(node.get("parent_id", -1))
+            parent_world = comp_world.get(parent_id)
+            if parent_world is None and parent_id >= 0:
+                parent_world = frame_mats.get(parent_id)
+            if parent_world is None and parent_id >= 0:
+                parent_world = runtime_default_world.get(parent_id)
+            comp_world[bid] = _mat_local_to_world(local, parent_world) if parent_world is not None else local
+
+        return comp_world
 
     torso_default_world = {}
     if len(torso_bones) >= 6 and len(torso_offsets) >= 5:
@@ -703,6 +790,109 @@ def _components_to_bone_tracks(
                 "pull": float(state_vals[base + 2]),
             }
         return controls
+
+    raw_bone_map = skel_data.get("bone_map", {}) if isinstance(skel_data, dict) else {}
+    tentacle_bone_names = {}
+    if isinstance(raw_bone_map, dict):
+        for key, value in raw_bone_map.items():
+            try:
+                bone_id = int(key)
+            except Exception:
+                continue
+            name = str(value or "").strip()
+            if not name:
+                continue
+            tentacle_bone_names[bone_id] = name
+
+    def _tentacle_group_bones(group_name):
+        prefix = str(group_name).strip().lower()
+        ordered = []
+        for bone_id, bone_name in tentacle_bone_names.items():
+            lower_name = bone_name.lower()
+            if not lower_name.startswith(prefix + "_"):
+                continue
+            suffix = lower_name[len(prefix) + 1:]
+            if not suffix.isdigit():
+                continue
+            ordered.append((int(suffix), int(bone_id)))
+        ordered.sort(key=lambda item: item[0])
+        return [bone_id for _, bone_id in ordered]
+
+    tentacle_group_bone_ids = {
+        group_name: _tentacle_group_bones(group_name)
+        for group_name in tentacle_group_names
+    }
+    tentacle_visualized_bone_ids = sorted({
+        int(bone_id)
+        for bone_ids in tentacle_group_bone_ids.values()
+        for bone_id in bone_ids
+        if bone_id is not None and int(bone_id) >= 0
+    })
+
+    def _tentacle_group_signs(group_name):
+        name = str(group_name).strip().lower()
+        if name == "uplefttent":
+            return 1.0, 1.0
+        if name == "uprighttent":
+            return -1.0, 1.0
+        if name == "lowlefttent":
+            return 1.0, -1.0
+        if name == "lowrighttent":
+            return -1.0, -1.0
+        return 0.0, 0.0
+
+    def _apply_tentacle_bone_visualization(frame_no, controls):
+        if not tentacle_visualized_bone_ids or not isinstance(controls, dict):
+            return 0
+
+        keyed = 0
+        for group_name, bone_ids in tentacle_group_bone_ids.items():
+            if not bone_ids:
+                continue
+
+            group_controls = controls.get(group_name, {})
+            if not isinstance(group_controls, dict):
+                continue
+
+            diameter = max(0.0, float(group_controls.get("diameter", 0.0)))
+            activity = max(0.0, float(group_controls.get("activity", 0.0)))
+            pull = max(0.0, float(group_controls.get("pull", 0.0)))
+            activity_delta = max(0.0, activity - 0.2)
+            lr_sign, ud_sign = _tentacle_group_signs(group_name)
+            bone_count = max(1, len(bone_ids))
+
+            for bone_ix, bone_id in enumerate(bone_ids):
+                chain_t = float(bone_ix + 1) / float(bone_count)
+                curl_angle = pull * (0.25 + 1.15 * chain_t)
+                twist_angle = activity_delta * (0.08 + 0.36 * chain_t)
+                spread_angle = diameter * (0.06 + 0.18 * (1.0 - chain_t))
+
+                if group_name == "tongue":
+                    curl_angle *= 1.35
+                    twist_angle *= 0.5
+                    spread_angle = diameter * (0.02 + 0.08 * (1.0 - chain_t))
+
+                q_local = _id_quat()
+                if abs(curl_angle) > 1e-8:
+                    q_local = _quat_mul_wxyz(q_local, _quat_axis_angle_wxyz((1.0, 0.0, 0.0), curl_angle))
+                if abs(twist_angle) > 1e-8:
+                    twist_sign = -1.0 if group_name == "tongue" else 1.0
+                    q_local = _quat_mul_wxyz(q_local, _quat_axis_angle_wxyz((0.0, 1.0, 0.0), twist_angle * twist_sign))
+                if abs(spread_angle) > 1e-8:
+                    if lr_sign != 0.0:
+                        q_local = _quat_mul_wxyz(q_local, _quat_axis_angle_wxyz((0.0, 0.0, 1.0), spread_angle * lr_sign))
+                    if ud_sign != 0.0:
+                        q_local = _quat_mul_wxyz(q_local, _quat_axis_angle_wxyz((0.0, 1.0, 0.0), spread_angle * 0.35 * ud_sign))
+
+                _assign_rot(
+                    bone_tracks,
+                    bone_id,
+                    frame_no,
+                    _engine_to_blender_quat_wxyz(q_local),
+                )
+                keyed += 1
+
+        return keyed
 
     fing52_bones = list(fing52_comp.get("bone_indices", ())) if fing52_comp else []
     fing52_offsets = list(fing52_comp.get("offset_locs", ())) if fing52_comp else []
@@ -2458,11 +2648,88 @@ def _components_to_bone_tracks(
 
             elif comp_ix == COMP_ARBITRARY_PO:
                 comp_applied = True
+                frame_mats = _frame_map(frame_no)
+                frame_applied = False
+
+                for bit in range(16):
+                    if (mask & (1 << bit)) == 0:
+                        continue
+                    xyz, cursor = _consume_xyz(values, cursor)
+                    if xyz is None:
+                        break
+                    if bit < 12:
+                        if bit < len(arbitrary_state_quats):
+                            arbitrary_state_quats[bit] = _quat_from_xyz(*xyz)
+                            frame_applied = True
+                    else:
+                        pos_ix = bit - 12
+                        if pos_ix < len(arbitrary_state_positions):
+                            arbitrary_state_positions[pos_ix] = tuple(float(v) for v in xyz)
+                            frame_applied = True
+
+                keyed_bones = set(int(v) for v in comp.get("arbitrary_keyed_bones", ()))
+                position_bones = set(int(v) for v in comp.get("arbitrary_position_bones", ()))
+                comp_world = _build_arbitrary_component_world(frame_mats) if arbitrary_nodes else {}
+                if comp_world:
+                    _cache_component_world_write_once(frame_mats, comp_world)
+
+                    for node in arbitrary_nodes:
+                        bid = int(node.get("id", -1))
+                        if bid < 0 or bid not in frame_mats:
+                            continue
+
+                        parent_id = _local_parent_for_bone(bid, fallback_parent=int(node.get("parent_id", -1)))
+                        quat_ix = int(node.get("quat_index", -1))
+                        use_std_pose_quat = bool(node.get("use_std_pose_quat", False))
+                        use_std_pose_pos = bool(node.get("use_std_pose_pos", False))
+
+                        if use_std_pose_quat:
+                            fallback_quat = arbitrary_default_quats[quat_ix] if 0 <= quat_ix < len(arbitrary_default_quats) else None
+                            _assign_parent_space_rot(
+                                bone_tracks,
+                                bid,
+                                frame_no,
+                                frame_mats,
+                                parent_id,
+                                default_quat=_default_quat_for_bone(bid, fallback_quat=fallback_quat),
+                            )
+                            keyed_bones.add(bid)
+                            frame_applied = True
+
+                        if use_std_pose_pos:
+                            local_xform = frame_mats[bid]
+                            if parent_id is not None:
+                                ipid = int(parent_id)
+                                if ipid >= 0 and ipid in frame_mats:
+                                    parent_inv = _mat_rigid_inverse(frame_mats[ipid])
+                                    local_xform = _mat_local_to_world(local_xform, parent_inv)
+                            _assign_loc(
+                                bone_tracks,
+                                bid,
+                                frame_no,
+                                (
+                                    float(local_xform[3][0]),
+                                    float(local_xform[3][1]),
+                                    float(local_xform[3][2]),
+                                ),
+                            )
+                            keyed_bones.add(bid)
+                            position_bones.add(bid)
+                            frame_applied = True
+
                 notes = comp.setdefault("apply_notes", [])
-                if "arbitrary_po_metadata_only" not in notes:
-                    notes.append("arbitrary_po_metadata_only")
+                if frame_applied:
+                    if "arbitrary_po_runtime_local_tracks" not in notes:
+                        notes.append("arbitrary_po_runtime_local_tracks")
+                else:
+                    if "arbitrary_po_metadata_only" not in notes:
+                        notes.append("arbitrary_po_metadata_only")
                 if arbitrary_nodes and "arbitrary_node_count" not in comp:
                     comp["arbitrary_node_count"] = int(len(arbitrary_nodes))
+                if keyed_bones:
+                    comp["arbitrary_keyed_bones"] = sorted(keyed_bones)
+                if position_bones:
+                    comp["arbitrary_position_bones"] = sorted(position_bones)
                 continue
 
             elif comp_ix == COMP_GENERIC:
@@ -2484,8 +2751,19 @@ def _components_to_bone_tracks(
                     frame_applied = True
 
                 controls_by_frame = comp.setdefault("tentacle_controls", {})
-                controls_by_frame[int(frame_no)] = _tentacle_controls_from_state(tentacle_state_values)
-                if frame_applied or controls_by_frame:
+                controls = _tentacle_controls_from_state(tentacle_state_values)
+                controls_by_frame[int(frame_no)] = controls
+
+                tentacle_visualized = _apply_tentacle_bone_visualization(int(frame_no), controls)
+                notes = comp.setdefault("apply_notes", [])
+                if tentacle_visualized > 0:
+                    comp["tentacle_visualized_bones"] = list(tentacle_visualized_bone_ids)
+                    if "tentacle_heuristic_bone_visualization" not in notes:
+                        notes.append("tentacle_heuristic_bone_visualization")
+                elif controls_by_frame and "tentacle_controls_metadata_only" not in notes:
+                    notes.append("tentacle_controls_metadata_only")
+
+                if frame_applied or controls_by_frame or tentacle_visualized > 0:
                     comp_applied = True
                 continue
 
