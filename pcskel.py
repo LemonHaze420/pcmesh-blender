@@ -492,6 +492,35 @@ class NalSkeletonParser:
                 'values': [float(v) for v in vals],
             }
 
+        if comp_type == int(NalComponentType.ArbitraryPO):
+            if len(pose_bytes) < 16:
+                return None
+            quat_count, total_count, field_8, field_C = struct.unpack('<4I', pose_bytes[:16])
+            quat_count = int(quat_count)
+            total_count = int(total_count)
+            if quat_count < 0 or total_count < quat_count:
+                return None
+            position_count = total_count - quat_count
+            expected_size = 16 + quat_count * 16 + position_count * 12
+            if expected_size > len(pose_bytes):
+                return None
+            quats = unpack_quat_list(pose_bytes[16:], quat_count) if quat_count > 0 else []
+            positions = []
+            pos_off = 16 + quat_count * 16
+            for i in range(position_count):
+                px, py, pz = struct.unpack_from('<3f', pose_bytes, pos_off + i * 12)
+                positions.append((float(px), float(py), float(pz)))
+            return {
+                'kind': 'arbitrary_po_pose',
+                'quat_count': quat_count,
+                'total_count': total_count,
+                'position_count': position_count,
+                'field_8': int(field_8),
+                'field_C': int(field_C),
+                'quats': quats,
+                'positions': positions,
+            }
+
         if comp_type == int(NalComponentType.FiveFinger_Top2KnuckleCurl):
             if len(pose_bytes) < 192:
                 return None
@@ -742,42 +771,89 @@ class NalSkeletonParser:
 
     def parse_arbitrary_po(self, f, block_start):
         data = struct.unpack('<8I', f.read(32))
-        bone_count = data[0]
-        block_data_offset = data[6]
+        bone_count = int(data[0])
+        quat_track_count = int(data[1])
+        vector_track_count = int(data[2])
+        layout_flags = int(data[3])
+        quat_table_offset = int(data[4])
+        position_table_offset = int(data[5])
+        node_list_offset = int(data[6])
+        node_order_offset = int(data[7])
+
+        per_skel_quats = []
+        if (
+            quat_table_offset > 0
+            and position_table_offset > quat_table_offset
+            and ((position_table_offset - quat_table_offset) % 16) == 0
+        ):
+            f.seek(block_start + quat_table_offset)
+            quat_blob = f.read(position_table_offset - quat_table_offset)
+            for i in range(len(quat_blob) // 16):
+                x, y, z, w = struct.unpack_from('<4f', quat_blob, i * 16)
+                per_skel_quats.append((float(w), float(x), float(y), float(z)))
+
+        per_skel_positions = []
+        if (
+            position_table_offset > 0
+            and node_list_offset > position_table_offset
+            and ((node_list_offset - position_table_offset) % 12) == 0
+        ):
+            f.seek(block_start + position_table_offset)
+            pos_blob = f.read(node_list_offset - position_table_offset)
+            for i in range(len(pos_blob) // 12):
+                px, py, pz = struct.unpack_from('<3f', pos_blob, i * 12)
+                per_skel_positions.append((float(px), float(py), float(pz)))
+
+        node_order = []
+        if node_order_offset > 0 and bone_count > 0:
+            f.seek(block_start + node_order_offset)
+            order_blob = f.read(bone_count * 4)
+            if len(order_blob) == bone_count * 4:
+                node_order = [int(v) for v in struct.unpack(f'<{bone_count}I', order_blob)]
 
         nodes = []
-        node_list_offset = block_start + block_data_offset
-        f.seek(node_list_offset)
-        
+        node_list_abs = block_start + node_list_offset
+        f.seek(node_list_abs)
+
         for _ in range(bone_count):
             node_data = f.read(48)
             _, node_name = struct.unpack('<I28s', node_data[:32])
             node_name_str = node_name.decode('latin-1').split('\x00')[0]
-            
-            indices = struct.unpack('<HHhh', node_data[32:40])
-            my_matrix_ix = indices[2] # iMyMatrixIx
-            parent_matrix_ix = indices[3] # iParentMatrixIx
-            
-            flags = struct.unpack('<HHi', node_data[40:48])
 
-            # Update bone map
+            quat_ix, pos_ix, my_matrix_ix, parent_matrix_ix = struct.unpack('<HHhh', node_data[32:40])
+            use_std_pose_quat, use_std_pose_pos, runtime_flags = struct.unpack('<HHi', node_data[40:48])
+
             if node_name_str:
-                self.bone_map[my_matrix_ix] = node_name_str
-            
-            # Update parent map
-            self.parent_map[my_matrix_ix] = parent_matrix_ix
+                self.bone_map[int(my_matrix_ix)] = node_name_str
+
+            self.parent_map[int(my_matrix_ix)] = int(parent_matrix_ix)
 
             nodes.append({
-                "name": node_name_str,
-                "id": my_matrix_ix,
-                "parent_id": parent_matrix_ix,
-                "indices": indices,
-                "flags": flags
+                'name': node_name_str,
+                'id': int(my_matrix_ix),
+                'parent_id': int(parent_matrix_ix),
+                'quat_index': int(quat_ix),
+                'pos_index': int(pos_ix),
+                'use_std_pose_quat': bool(use_std_pose_quat),
+                'use_std_pose_pos': bool(use_std_pose_pos),
+                'runtime_flags': int(runtime_flags),
+                'indices': (int(quat_ix), int(pos_ix), int(my_matrix_ix), int(parent_matrix_ix)),
+                'flags': (int(use_std_pose_quat), int(use_std_pose_pos), int(runtime_flags)),
             })
-            
+
         return {
-            "bone_count": bone_count,
-            "nodes": nodes
+            'bone_count': bone_count,
+            'quat_track_count': quat_track_count,
+            'vector_track_count': vector_track_count,
+            'layout_flags': layout_flags,
+            'quat_table_offset': quat_table_offset,
+            'position_table_offset': position_table_offset,
+            'node_list_offset': node_list_offset,
+            'node_order_offset': node_order_offset,
+            'per_skel_quats': per_skel_quats,
+            'per_skel_positions': per_skel_positions,
+            'node_order': node_order,
+            'nodes': nodes,
         }
 
 def open_pcskel(filepath: str) -> dict:
