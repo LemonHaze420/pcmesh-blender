@@ -34,6 +34,8 @@ _ENGINE_TO_BLENDER_BASIS = Matrix.Rotation(math.radians(90.0), 4, 'X')
 _BLENDER_TO_ENGINE_BASIS = _ENGINE_TO_BLENDER_BASIS.inverted()
 _ENGINE_TO_BLENDER_BASIS_3 = _ENGINE_TO_BLENDER_BASIS.to_3x3()
 _BLENDER_TO_ENGINE_BASIS_3 = _BLENDER_TO_ENGINE_BASIS.to_3x3()
+_ENGINE_BIND_TO_BLENDER_BONE_CORRECTION = Matrix.Rotation(math.radians(90.0), 4, 'Y')
+_BLENDER_BONE_TO_ENGINE_BIND_CORRECTION = _ENGINE_BIND_TO_BLENDER_BONE_CORRECTION.inverted()
 
 
 def _engine_to_blender_vec3(v):
@@ -47,6 +49,89 @@ def _blender_to_engine_vec3(v):
 def _engine_to_blender_matrix4(m):
     return _ENGINE_TO_BLENDER_BASIS @ m @ _BLENDER_TO_ENGINE_BASIS
 
+
+def _blender_to_engine_matrix4(m):
+    return _BLENDER_TO_ENGINE_BASIS @ m @ _ENGINE_TO_BLENDER_BASIS
+
+def _pcanim_action_source_label(filepath):
+    path = Path(str(filepath or ""))
+    return path.stem or path.name
+
+
+def _build_pcanim_action_name(filepath, anim_name):
+    return f"{_pcanim_action_source_label(filepath)}:{anim_name}"
+
+
+def _find_matching_pcskel_path(pcmesh_path):
+    pcmesh_file = Path(pcmesh_path)
+    try:
+        entries = list(pcmesh_file.parent.iterdir())
+    except OSError:
+        return None
+
+    stem_folded = pcmesh_file.stem.casefold()
+    candidates = [
+        entry
+        for entry in entries
+        if entry.is_file()
+        and entry.suffix.casefold() == ".pcskel"
+        and entry.stem.casefold() == stem_folded
+    ]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return str(candidates[0])
+
+    exact_stem_matches = [entry for entry in candidates if entry.stem == pcmesh_file.stem]
+    if len(exact_stem_matches) == 1:
+        return str(exact_stem_matches[0])
+    return None
+
+
+def _pcmesh_max_bone_count(pcmesh_path):
+    max_bone_count = 0
+    for mesh_data in read_meshfile(pcmesh_path):
+        bone_count = len(mesh_data.bones or [])
+        if bone_count > max_bone_count:
+            max_bone_count = bone_count
+    return max_bone_count
+
+
+def _show_detected_pcskel_prompt(context, detected_skel_path):
+    detected_name = os.path.basename(detected_skel_path)
+
+    def draw(self, _context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.label(text="Import with detected matching PCSKEL?")
+        col.label(text=f"File: {detected_name}")
+        col.label(text=f"Path: {detected_skel_path}")
+        row = col.row(align=True)
+        use_detected = row.operator(OT_ImportDetectedPCSKEL.bl_idname, text="Yes")
+        use_detected.detected_skel_path = detected_skel_path
+        row.operator(OT_OpenFileBrowser.bl_idname, text="No")
+
+    context.window_manager.popup_menu(draw, title="Detected matching PCSKEL", icon='QUESTION')
+
+
+class OT_ImportDetectedPCSKEL(bpy.types.Operator):
+    bl_idname = "wm.import_detected_pcskel"
+    bl_label = "Import detected PCSKEL"
+
+    detected_skel_path: bpy.props.StringProperty(subtype="FILE_PATH")
+
+    def execute(self, context):
+        global requested_pcmesh
+        if not requested_pcmesh:
+            self.report({'ERROR'}, "No PCMESH import request is pending")
+            return {'CANCELLED'}
+        if not self.detected_skel_path or not Path(self.detected_skel_path).is_file():
+            self.report({'WARNING'}, "Detected PCSKEL is no longer available; choose one manually")
+            return bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
+        import_pcmesh(requested_pcmesh, self.detected_skel_path)
+        return {'FINISHED'}
+
+
 class OT_OpenFileBrowser(bpy.types.Operator):
     bl_idname = "wm.open_pcskel"
     bl_label = "Select a skeleton"
@@ -55,7 +140,17 @@ class OT_OpenFileBrowser(bpy.types.Operator):
 
     def execute(self, context):
         global requested_pcmesh
-        import_pcmesh(requested_pcmesh, self.filepath)
+        if not requested_pcmesh:
+            self.report({'ERROR'}, "No PCMESH import request is pending")
+            return {'CANCELLED'}
+
+        selected_skel_path = str(self.filepath or "")
+        if not selected_skel_path:
+            requested_pcmesh = ""
+            self.report({'INFO'}, "Skeleton selection cancelled")
+            return {'CANCELLED'}
+
+        import_pcmesh(requested_pcmesh, selected_skel_path)
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -68,7 +163,7 @@ def import_pcmesh(pcmesh_path, skel_path=None):
     skel_data = {}
     loaded_skel_path = skel_path or ""
 
-    if skel_path is not None:
+    if skel_path:
         skel_data = open_pcskel(skel_path)
         print(f"Loaded {skel_data['header']['name']}")
 
@@ -451,8 +546,6 @@ def create_mesh(path, mesh_data):
     mod.object = armature_object
     
     section0 = mesh_data.sections[0]
-    #if section0.get('materials'):       # @todo: multiple mats
-        #assign_texture_to_object(os.path.join(os.path.dirname(path), section0['materials'][0]), mesh_data.name)#section['name'])                
         
     mesh.materials.clear()
     for sec_idx, section in enumerate(mesh_data.sections):
@@ -501,14 +594,14 @@ class PCMESHImporter(bpy.types.Operator):
         global requested_pcmesh
         requested_pcmesh = self.filepath
 
-        has_bones = False
-        for mesh_data in read_meshfile(requested_pcmesh):
-            if mesh_data.bones:
-                has_bones = True
-                break
-
-        if not has_bones:
+        max_bone_count = _pcmesh_max_bone_count(requested_pcmesh)
+        if max_bone_count <= 2:
             import_pcmesh(requested_pcmesh, skel_path=None)
+            return {'FINISHED'}
+
+        detected_skel_path = _find_matching_pcskel_path(requested_pcmesh)
+        if detected_skel_path:
+            _show_detected_pcskel_prompt(context, detected_skel_path)
             return {'FINISHED'}
 
         return bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
@@ -643,6 +736,188 @@ def _build_id_to_bone_name(armature_obj, skel_info=None):
         pass
 
     return id_to_name
+
+
+def _build_rest_local_mats_blender(armature_obj, skel_info=None):
+    if armature_obj is None or getattr(armature_obj, "type", "") != 'ARMATURE':
+        return {}
+
+    data_bones = getattr(armature_obj.data, "bones", None)
+    if data_bones is None:
+        return {}
+
+    id_to_name = _build_id_to_bone_name(armature_obj, skel_info)
+    if not id_to_name:
+        return {}
+
+    name_to_id = {}
+    for bid, name in id_to_name.items():
+        if int(bid) < 0:
+            continue
+        name_to_id[str(name)] = int(bid)
+
+    out = {}
+    for bone in data_bones:
+        bid = name_to_id.get(bone.name)
+        if bid is None:
+            continue
+
+        local_bl = bone.matrix_local.copy()
+        parent = bone.parent
+        if parent is not None and parent.name in name_to_id:
+            local_bl = parent.matrix_local.inverted() @ bone.matrix_local
+
+        out[int(bid)] = local_bl.copy()
+
+    return out
+
+
+def _build_rest_local_quats_engine(armature_obj, skel_info=None, rest_local_mats_blender=None):
+    rest_local_mats = rest_local_mats_blender
+    if rest_local_mats is None:
+        rest_local_mats = _build_rest_local_mats_blender(armature_obj, skel_info)
+    if not rest_local_mats:
+        return {}
+
+    out = {}
+    for bid, local_bl in rest_local_mats.items():
+        local_eng = _blender_to_engine_matrix4(local_bl)
+        q = local_eng.to_quaternion()
+        out[int(bid)] = (float(q.w), float(q.x), float(q.y), float(q.z))
+
+    return out
+
+
+def _parse_runtime_engine_matrix_map(matrix_map):
+    out = {}
+    if not isinstance(matrix_map, dict):
+        return out
+
+    for key, value in matrix_map.items():
+        try:
+            bid = int(key)
+        except Exception:
+            continue
+        if bid < 0 or not isinstance(value, (list, tuple)) or len(value) != 4:
+            continue
+        try:
+            out[bid] = Matrix(value).transposed()
+        except Exception:
+            continue
+
+    return out
+
+
+def _merge_bone_track_maps(primary_tracks, fallback_tracks):
+    if not isinstance(primary_tracks, dict):
+        primary_tracks = {}
+    if not isinstance(fallback_tracks, dict):
+        fallback_tracks = {}
+    if not primary_tracks:
+        return fallback_tracks
+    if not fallback_tracks:
+        return primary_tracks
+
+    merged = {}
+
+    def _merge_from(source_tracks):
+        for bone_id, tracks in source_tracks.items():
+            try:
+                bid = int(bone_id)
+            except Exception:
+                continue
+            if not isinstance(tracks, dict):
+                continue
+            dst = merged.setdefault(bid, {"rotation": {}, "location": {}})
+            for channel in ("rotation", "location"):
+                channel_tracks = tracks.get(channel, {})
+                if not isinstance(channel_tracks, dict):
+                    continue
+                dst_channel = dst[channel]
+                for frame_no, value in channel_tracks.items():
+                    try:
+                        fno = int(frame_no)
+                    except Exception:
+                        continue
+                    dst_channel[fno] = value
+
+    _merge_from(fallback_tracks)
+    _merge_from(primary_tracks)
+    return merged
+
+
+def _build_runtime_pose_tracks_from_engine_world(armature_obj, anim, skel_info=None, rest_local_mats_blender=None):
+    if not isinstance(anim, dict):
+        return {}
+
+    rest_local_mats = rest_local_mats_blender
+    if rest_local_mats is None:
+        rest_local_mats = _build_rest_local_mats_blender(armature_obj, skel_info)
+    if not rest_local_mats:
+        return {}
+
+    runtime_frames = {}
+    for frame_key, matrix_map in (anim.get("runtime_frame_world_engine", {}) or {}).items():
+        try:
+            frame_no = int(frame_key)
+        except Exception:
+            continue
+        if frame_no < 1:
+            continue
+        parsed_map = _parse_runtime_engine_matrix_map(matrix_map)
+        if parsed_map:
+            runtime_frames[frame_no] = parsed_map
+    if not runtime_frames:
+        return {}
+
+    runtime_default = _parse_runtime_engine_matrix_map(anim.get("runtime_default_world_engine", {}) or {})
+    parent_by_bone = {}
+    for key, value in (anim.get("runtime_parent_by_bone", {}) or {}).items():
+        try:
+            bid = int(key)
+            pid = int(value)
+        except Exception:
+            continue
+        if bid < 0:
+            continue
+        parent_by_bone[bid] = pid if pid >= 0 else -1
+
+    bone_tracks = {}
+    for frame_no in sorted(runtime_frames.keys()):
+        world_by_bone = runtime_frames[frame_no]
+        for bone_id, world_eng in world_by_bone.items():
+            rest_local_bl = rest_local_mats.get(bone_id)
+            if rest_local_bl is None:
+                continue
+
+            parent_id = parent_by_bone.get(bone_id, -1)
+            parent_world_eng = world_by_bone.get(parent_id) if parent_id >= 0 else None
+            if parent_world_eng is None and parent_id >= 0:
+                parent_world_eng = runtime_default.get(parent_id)
+
+            local_eng = world_eng.copy()
+            if parent_world_eng is not None:
+                local_eng = parent_world_eng.inverted() @ world_eng
+
+            pose_local_eng = local_eng @ _ENGINE_BIND_TO_BLENDER_BONE_CORRECTION
+            if parent_id >= 0:
+                pose_local_eng = (
+                    _BLENDER_BONE_TO_ENGINE_BIND_CORRECTION
+                    @ local_eng
+                    @ _ENGINE_BIND_TO_BLENDER_BONE_CORRECTION
+                )
+
+            local_bl = _engine_to_blender_matrix4(pose_local_eng)
+            basis_bl = rest_local_bl.inverted() @ local_bl
+            q = basis_bl.to_quaternion()
+            loc = basis_bl.to_translation()
+            loc_eng = _blender_to_engine_vec3((float(loc.x), float(loc.y), float(loc.z)))
+
+            tracks = bone_tracks.setdefault(int(bone_id), {"rotation": {}, "location": {}})
+            tracks["rotation"][int(frame_no)] = (float(q.w), float(q.x), float(q.y), float(q.z))
+            tracks["location"][int(frame_no)] = (float(loc_eng.x), float(loc_eng.y), float(loc_eng.z))
+
+    return bone_tracks
 
 
 def _quat_normalize_wxyz(q):
@@ -813,7 +1088,7 @@ class PCANIMImporter(bpy.types.Operator):
     )
     use_full_arm_tracks: bpy.props.BoolProperty(
         name="Direct Arm Tracks",
-        description="Apply runtime-style direct arm quaternions for all arm tracks (disable for legacy clavicle/hand-only fallback)",
+        description="Apply runtime-style direct arm quaternions for the full arm chain",
         default=True,
     )
 
@@ -839,6 +1114,13 @@ class PCANIMImporter(bpy.types.Operator):
         if skel_err:
             self.report({'WARNING'}, skel_err)
 
+        rest_local_mats = _build_rest_local_mats_blender(armature_obj, skel_info)
+        rest_local_quats = _build_rest_local_quats_engine(
+            armature_obj,
+            skel_info,
+            rest_local_mats_blender=rest_local_mats,
+        )
+
         try:
             parsed = open_pcanim(
                 self.filepath,
@@ -846,6 +1128,7 @@ class PCANIMImporter(bpy.types.Operator):
                 apply_root_motion=self.apply_root_motion,
                 solve_ik=self.solve_ik_chains,
                 use_full_arm_tracks=self.use_full_arm_tracks,
+                rest_local_quats_by_bone=rest_local_quats,
             )
         except Exception as e:
             self.report({'ERROR'}, f"Failed to parse PCANIM: {e}")
@@ -866,14 +1149,16 @@ class PCANIMImporter(bpy.types.Operator):
         created = 0
         decoded_actions = 0
         metadata_only_actions = 0
+        rest_fallback_actions = 0
+        rest_fallback_names = []
         max_end = 1
         first_action = None
-        source_name = os.path.basename(self.filepath)
+        source_label = _pcanim_action_source_label(self.filepath)
         id_to_name = _build_id_to_bone_name(armature_obj, skel_info)
 
         for idx, anim in enumerate(anims):
             anim_name = anim.get("name") or f"anim_{idx:03d}"
-            action = bpy.data.actions.new(name=f"{source_name}:{anim_name}")
+            action = bpy.data.actions.new(name=_build_pcanim_action_name(source_label, anim_name))
             action.use_fake_user = True
 
             frame_count = max(1, int(anim.get("frame_count", 1)))
@@ -887,14 +1172,6 @@ class PCANIMImporter(bpy.types.Operator):
             action["pcanim_scene_anim"] = bool(int(anim.get("flags", 0)) & FLAG_SCENE_ANIM)
             action["pcanim_skel_index"] = int(anim.get("skel_index", -1))
             action["pcanim_version"] = int(anim.get("version", 0))
-            action["pcanim_decoded_component_count"] = int(len(anim.get("decoded_components", [])))
-            action["pcanim_import_options"] = (
-                f"root_motion={int(bool(self.apply_root_motion))};"
-                f"normalize_rot={int(bool(self.normalize_rot_from_first_frame))};"
-                f"apply_to_lods={int(bool(self.apply_to_matching_lods))};"
-                f"solve_ik={int(bool(self.solve_ik_chains))};"
-                f"full_arm_tracks={int(bool(self.use_full_arm_tracks))}"
-            )
 
             decoded_components = anim.get("decoded_components", [])
             comp_ids = [int(c.get("comp_ix", -1)) for c in decoded_components]
@@ -911,22 +1188,29 @@ class PCANIMImporter(bpy.types.Operator):
             })
             action["pcanim_applied_component_ids"] = ",".join(str(i) for i in applied_ids)
             action["pcanim_noop_component_ids"] = ",".join(str(i) for i in noop_ids)
-            action["pcanim_has_legs_ik"] = bool(6 in comp_ids)
-            action["pcanim_has_arms"] = bool(7 in comp_ids)
-            action["pcanim_has_arms_ik"] = bool(8 in comp_ids)
+
+            tentacle_control_frames = 0
+            for c in decoded_components:
+                if int(c.get("comp_ix", -1)) != 9:
+                    continue
+                controls = c.get("tentacle_controls", {})
+                if isinstance(controls, dict):
+                    tentacle_control_frames = max(tentacle_control_frames, int(len(controls)))
+            action["pcanim_tentacle_control_frames"] = int(tentacle_control_frames)
 
             decode_warnings = anim.get("decode_warnings", [])
             if decode_warnings:
                 action["pcanim_decode_warning_count"] = int(len(decode_warnings))
-                action["pcanim_decode_warning_head"] = " | ".join(str(w) for w in decode_warnings[:3])
 
             keyed_bones = 0
-            bone_tracks = anim.get("bone_tracks", {})
-            root_tracks = bone_tracks.get(-1, {}) if isinstance(bone_tracks, dict) else {}
-            root_rot_count = len(root_tracks.get("rotation", {})) if isinstance(root_tracks, dict) else 0
-            root_loc_count = len(root_tracks.get("location", {})) if isinstance(root_tracks, dict) else 0
-            action["pcanim_root_rot_keys"] = int(root_rot_count)
-            action["pcanim_root_loc_keys"] = int(root_loc_count)
+            runtime_bone_tracks = _build_runtime_pose_tracks_from_engine_world(
+                armature_obj,
+                anim,
+                skel_info=skel_info,
+                rest_local_mats_blender=rest_local_mats,
+            )
+            local_bone_tracks = anim.get("bone_tracks", {})
+            bone_tracks = _merge_bone_track_maps(runtime_bone_tracks, local_bone_tracks)
             if isinstance(bone_tracks, dict) and bone_tracks:
                 keyed_bones = _apply_bone_tracks_action(
                     armature_obj=armature_obj,
@@ -938,6 +1222,22 @@ class PCANIMImporter(bpy.types.Operator):
 
             if keyed_bones == 0:
                 _bake_rest_pose_action(armature_obj, action, frame_count)
+                action["pcanim_rest_pose_fallback"] = True
+                rest_fallback_actions += 1
+                if len(rest_fallback_names) < 5:
+                    rest_fallback_names.append(str(anim_name))
+
+                fallback_note = "no_keyed_bones_fallback_rest_pose"
+                if bool(anim.get("generic_animation_wip", False)) or int(anim.get("version", 0)) == GEN_ANIM:
+                    metadata_only_actions += 1
+                    fallback_note = "generic_animation_wip"
+                elif int(action.get("pcanim_tentacle_control_frames", 0)) > 0:
+                    metadata_only_actions += 1
+                    fallback_note = "tentacle_controls_metadata_only"
+                elif int(len(decoded_components)) > 0:
+                    metadata_only_actions += 1
+
+                action["pcanim_partial_playback_note"] = fallback_note
             else:
                 decoded_actions += 1
 
@@ -970,8 +1270,9 @@ class PCANIMImporter(bpy.types.Operator):
             f"solve_ik={int(bool(self.solve_ik_chains))}, "
             f"full_arm_tracks={int(bool(self.use_full_arm_tracks))}"
         )
-        if total_decode_warnings > 0:
-            self.report({'WARNING'}, f"Imported {created} animations ({decoded_actions} with keyed tracks, {metadata_only_actions} metadata-only), {total_decode_warnings} decode warnings, applied to {len(target_armatures)} armatures [{opts}]")
+        if total_decode_warnings > 0 or rest_fallback_actions > 0:
+            fallback_preview = ", ".join(rest_fallback_names[:3]) if rest_fallback_names else "none"
+            self.report({'WARNING'}, f"Imported {created} animations ({decoded_actions} with keyed tracks, {metadata_only_actions} metadata-only), {total_decode_warnings} decode warnings, {rest_fallback_actions} rest-pose fallbacks [{fallback_preview}], applied to {len(target_armatures)} armatures [{opts}]")
         else:
             self.report({'INFO'}, f"Imported {created} animations ({decoded_actions} with keyed tracks, {metadata_only_actions} metadata-only), applied to {len(target_armatures)} armatures [{opts}]")
         return {'FINISHED'}
@@ -1036,6 +1337,31 @@ class PCMESHPTPCANIMTools(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
+        def _csv_ints(value):
+            if value is None:
+                return []
+            out = []
+            for part in str(value).split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    out.append(int(part))
+                except Exception:
+                    continue
+            return out
+
+        armature_obj = _find_target_armature(context)
+        active_action = None
+        if armature_obj is not None:
+            anim_data = getattr(armature_obj, "animation_data", None)
+            if anim_data is not None:
+                active_action = anim_data.action
+
+        selected_action_name = str(getattr(scene, "pcmesh_pcanim_action_name", "")).strip()
+        selected_action = bpy.data.actions.get(selected_action_name) if selected_action_name else None
+        action = active_action or selected_action
+
         col = layout.column(align=True)
         col.label(text="Import Options")
         col.prop(scene, "pcmesh_pcanim_apply_root_motion")
@@ -1057,6 +1383,94 @@ class PCMESHPTPCANIMTools(bpy.types.Panel):
         col.prop_search(scene, "pcmesh_pcanim_action_name", bpy.data, "actions", text="")
         op = col.operator(PCMESHApplyPCANIMAction.bl_idname, text="Apply Action")
         op.apply_to_matching_lods = bool(scene.pcmesh_pcanim_apply_to_lods)
+
+        layout.separator()
+
+        skel_box = layout.box()
+        skel_box.label(text="Loaded PCSKEL")
+        if armature_obj is None:
+            skel_box.label(text="Select an imported armature to inspect PCSKEL metadata")
+        else:
+            skel_box.label(text=f"Armature: {armature_obj.name}")
+            skel_name = str(armature_obj.get("pcmesh_skel_name", "")).strip()
+            if skel_name:
+                skel_box.label(text=f"Skeleton: {skel_name}")
+            skel_path = str(armature_obj.get("pcmesh_skel_path", "")).strip()
+            if skel_path:
+                skel_box.label(text=f"Source: {os.path.basename(skel_path)}")
+
+            skel_info, skel_error = _load_skel_for_armature(armature_obj)
+            if skel_error:
+                skel_box.label(text=skel_error)
+            else:
+                header = dict((skel_info or {}).get("header", {}))
+                skel_kind = str(header.get("skeleton_kind", "")).strip()
+                if skel_kind:
+                    skel_box.label(text=f"Kind: {skel_kind}")
+
+                warnings = list((skel_info or {}).get("warnings", ()))
+                if warnings:
+                    skel_box.label(text=f"Warnings: {len(warnings)}")
+                    warn_col = skel_box.column(align=True)
+                    for warning in warnings[:3]:
+                        warn_col.label(text=warning)
+
+                if skel_kind == "generic":
+                    generic_nodes = list((skel_info or {}).get("generic_nodes", ()))
+                    bind_bones = len((skel_info or {}).get("bone_map", {}))
+                    helper_nodes = len((skel_info or {}).get("component_bone_names", {}))
+                    skel_box.label(text=f"Generic Nodes: {len(generic_nodes)} total / {bind_bones} bind / {helper_nodes} helper")
+                    summary = list((skel_info or {}).get("generic_component_summary", ()))
+                    comp_col = skel_box.column(align=True)
+                    for entry in summary:
+                        comp_col.label(text=f"{entry.get('name', 'Unknown')}: {int(entry.get('count', 0))}")
+                else:
+                    components = list((skel_info or {}).get("components", ()))
+                    skel_box.label(text=f"Components: {len(components)}")
+                    comp_col = skel_box.column(align=True)
+                    for comp in components:
+                        slot_ix = int(comp.get("component_index", -1))
+                        type_name = str(comp.get("type_name", "Unknown"))
+                        type_id = int(comp.get("type_id", 0))
+                        flags = int(comp.get("component_flags", 0))
+                        comp_col.label(text=f"{slot_ix:02d} {type_name}")
+                        comp_col.label(text=f"  hash 0x{type_id:08X}  flags 0x{flags:08X}")
+
+        layout.separator()
+
+        anim_box = layout.box()
+        anim_box.label(text="Last Applied PCANIM")
+        if action is None:
+            anim_box.label(text="No selected or applied PCANIM action")
+        else:
+            action_origin = "Applied" if active_action is not None else "Selected"
+            anim_box.label(text=f"{action_origin}: {action.name}")
+            source_path = str(action.get("pcanim_source", "")).strip()
+            if source_path:
+                anim_box.label(text=f"Source: {os.path.basename(source_path)}")
+
+            frame_count = int(action.get("pcanim_frame_count", 0))
+            duration = float(action.get("pcanim_duration", 0.0))
+            anim_box.label(text=f"Frames: {frame_count}  Duration: {duration:.3f}s")
+            anim_box.label(text=f"Version: {int(action.get('pcanim_version', 0))}  Skeleton Index: {int(action.get('pcanim_skel_index', -1))}")
+            anim_box.label(text=f"Loop: {bool(action.get('pcanim_loop', False))}  Scene: {bool(action.get('pcanim_scene_anim', False))}")
+
+            component_ids = _csv_ints(action.get("pcanim_component_ids", ""))
+            applied_ids = _csv_ints(action.get("pcanim_applied_component_ids", ""))
+            noop_ids = _csv_ints(action.get("pcanim_noop_component_ids", ""))
+            anim_box.label(text=f"Components: {len(component_ids)} total / {len(applied_ids)} applied / {len(noop_ids)} noop")
+            anim_box.label(text=f"Keyed Bones: {int(action.get('pcanim_keyed_bones', 0))}  Warnings: {int(action.get('pcanim_decode_warning_count', 0))}")
+
+            tentacle_frames = int(action.get("pcanim_tentacle_control_frames", 0))
+            if tentacle_frames > 0:
+                anim_box.label(text=f"Tentacle Control Frames: {tentacle_frames}")
+
+            if bool(action.get("pcanim_rest_pose_fallback", False)):
+                anim_box.label(text="Rest Pose Fallback: yes")
+
+            partial_note = str(action.get("pcanim_partial_playback_note", "")).strip()
+            if partial_note:
+                anim_box.label(text=f"Note: {partial_note}")
 
 class PCMESHExporter(bpy.types.Operator):
     bl_idname = "export_scene.pcmesh"
@@ -1192,6 +1606,7 @@ def menu_func_export(self, context):
     self.layout.operator(PCMESHExporter.bl_idname, text="PCMESH (.pcmesh)")
 
 def register():
+    bpy.utils.register_class(OT_ImportDetectedPCSKEL)
     bpy.utils.register_class(OT_OpenFileBrowser)
     bpy.utils.register_class(PCMESHImporter)
     bpy.utils.register_class(PCANIMImporter)
@@ -1242,13 +1657,14 @@ def unregister():
     if hasattr(bpy.types.Scene, "pcmesh_pcanim_apply_root_motion"):
         del bpy.types.Scene.pcmesh_pcanim_apply_root_motion
 
+    bpy.utils.unregister_class(PCMESHExporter)
     bpy.utils.unregister_class(PCMESHPTPCANIMTools)
     bpy.utils.unregister_class(PCMESHApplyPCANIMAction)
     bpy.utils.unregister_class(PCANIMImporter)
     bpy.utils.unregister_class(PCMESHImporter)
-    bpy.utils.unregister_class(PCMESHExporter)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.utils.unregister_class(OT_OpenFileBrowser)
+    bpy.utils.unregister_class(OT_ImportDetectedPCSKEL)
 if __name__ == "__main__":
     register()

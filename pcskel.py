@@ -82,24 +82,39 @@ class NalSkeletonParser:
             "components": [],
             "component_meta": [],
             "default_poses": {},
+            "warnings": [],
+            "generic_nodes": [],
+            "generic_components": [],
+            "generic_component_summary": [],
             "bone_map": self.bone_map,
             "parent_map": self.parent_map,
             "component_bone_names": self.component_bone_names,
         }
+
     def parse(self):
         with open(self.filepath, 'rb') as f:
             cls, version = struct.unpack('<II', f.read(8))
             _, name_str = read_fixed_string(f)
             _, cat_str = read_fixed_string(f)
             
+            cat_lower = cat_str.casefold()
             self.result["header"] = {
-                "class": cls, "version": version, 
-                "name": name_str, "category": cat_str
+                "class": cls,
+                "version": version,
+                "name": name_str,
+                "category": cat_str,
+                "skeleton_kind": "character",
             }
 
-            if "generic" in cat_str or "panel" in cat_str:
+            if "generic" in cat_lower or int(version) == 0x10200:
+                self.result["header"]["skeleton_kind"] = "generic"
+                self._parse_generic_skeleton(f)
                 return self.result
 
+            if "panel" in cat_lower:
+                self.result["header"]["skeleton_kind"] = "panel"
+                self.result["warnings"].append("Panel skeleton parsing is not implemented")
+                return self.result
             #mind gap 
             num_skel_data = struct.unpack('<i', f.read(4))[0]
             f.read(24)
@@ -249,8 +264,8 @@ class NalSkeletonParser:
                                 })
                                 rec["default_pose"] = pose
                                 component_records[int(cix)] = rec
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.result["warnings"].append(f"Default pose parse failed: {e}")
 
             if component_records:
                 self.result["components"] = [
@@ -259,6 +274,116 @@ class NalSkeletonParser:
                 ]
 
         return self.result
+
+    def _parse_generic_skeleton(self, f):
+        generic_header = struct.unpack('<14I', f.read(56))
+        field_64 = int(generic_header[7])
+        field_6c = int(generic_header[9])
+        node_count = int(generic_header[11])
+        component_record_count = int(generic_header[13])
+
+        data_region_off = 0xE0
+        node_record_size = 48
+        component_record_size = 40
+        table_a_off = data_region_off + field_64
+        node_records_off = (table_a_off + field_6c + 3) & ~3
+        component_records_off = (node_records_off + node_record_size * node_count + 3) & ~3
+        file_size = os.fstat(f.fileno()).st_size
+
+        self.result["header"].update({
+            "generic_lookup_a_size": int(field_64),
+            "generic_lookup_b_size": int(field_6c),
+            "generic_node_count": int(node_count),
+            "generic_component_record_count": int(component_record_count),
+        })
+        self.result["generic_layout"] = {
+            "data_region_off": int(data_region_off),
+            "lookup_a_off": int(table_a_off),
+            "node_records_off": int(node_records_off),
+            "component_records_off": int(component_records_off),
+        }
+
+
+        nodes = []
+        for node_ix in range(node_count):
+            record_off = node_records_off + node_ix * node_record_size
+            if record_off < 0 or record_off + node_record_size > file_size:
+                self.result["warnings"].append(
+                    f"Generic node table truncated at record {node_ix} (offset 0x{record_off:X})"
+                )
+                break
+            f.seek(record_off)
+            name_hash, name = read_fixed_string(f)
+            kind, pose_offset, data_offset, parent_index = struct.unpack('<iiii', f.read(16))
+            nodes.append({
+                "node_index": int(node_ix),
+                "name_hash": int(name_hash),
+                "name": name,
+                "kind": int(kind),
+                "pose_offset": int(pose_offset),
+                "data_offset": int(data_offset),
+                "parent_index": int(parent_index),
+            })
+        self.result["generic_nodes"] = nodes
+
+        generic_components = []
+        for comp_ix in range(component_record_count):
+            record_off = component_records_off + comp_ix * component_record_size
+            if record_off < 0 or record_off + 40 > file_size:
+                self.result["warnings"].append(
+                    f"Generic component table truncated at record {comp_ix} (offset 0x{record_off:X})"
+                )
+                break
+            f.seek(record_off)
+            name_hash, name = read_fixed_string(f)
+            target_index, flags = struct.unpack('<ii', f.read(8))
+            generic_components.append({
+                "component_index": int(comp_ix),
+                "name_hash": int(name_hash),
+                "name": name,
+                "target_index": int(target_index),
+                "flags": int(flags),
+            })
+        self.result["generic_components"] = generic_components
+
+        helper_names = {"bip01_prop_free", "shake_root", "fakeroot"}
+        for node in nodes:
+            node_ix = int(node.get("node_index", -1))
+            name = str(node.get("name", "")).strip()
+            if not name:
+                continue
+            if name in helper_names:
+                self.component_bone_names[node_ix] = name
+                continue
+            self.bone_map[node_ix] = name
+
+        for node in nodes:
+            node_ix = int(node.get("node_index", -1))
+            if node_ix not in self.bone_map:
+                continue
+            parent_index = int(node.get("parent_index", -1))
+            self.parent_map[node_ix] = parent_index if parent_index in self.bone_map else -1
+
+        summary = {}
+        summary_order = []
+        for comp in generic_components:
+            name = str(comp.get("name", "")).strip() or "Unknown"
+            if name not in summary:
+                summary[name] = {
+                    "name": name,
+                    "count": 0,
+                    "target_indices": [],
+                }
+                summary_order.append(name)
+            entry = summary[name]
+            entry["count"] += 1
+            entry["target_indices"].append(int(comp.get("target_index", -1)))
+        self.result["generic_component_summary"] = [summary[name] for name in summary_order]
+
+        self.result["warnings"].append(
+            "WIP"
+        )
+
 
     def _get_pose_index_for_comp_index(self, component_meta, comp_index):
         if comp_index < 0 or comp_index >= len(component_meta):
