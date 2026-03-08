@@ -495,12 +495,16 @@ class NalSkeletonParser:
         if comp_type == int(NalComponentType.FiveFinger_Top2KnuckleCurl):
             if len(pose_bytes) < 192:
                 return None
-            quats = unpack_quat_list(pose_bytes, 9)
+            thumb_quats = unpack_quat_list(pose_bytes, 2)
+            packed_tracks = struct.unpack('<34f', pose_bytes[:136])
             other = struct.unpack('<10f', pose_bytes[144:184])
             available_tracks = struct.unpack('<I', pose_bytes[184:188])[0]
             return {
                 'kind': 'fing52_pose',
-                'quats': quats,
+                'thumb_quats': thumb_quats,
+                'base_y_tracks': [float(v) for v in packed_tracks[8:16]],
+                'base_z_tracks': [float(v) for v in packed_tracks[16:24]],
+                'hinge_tracks': [float(v) for v in packed_tracks[24:34]],
                 'other_tracks': [float(v) for v in other],
                 'available_tracks': int(available_tracks),
             }
