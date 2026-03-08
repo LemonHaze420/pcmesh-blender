@@ -23,10 +23,9 @@ from os import listdir
 from os.path import isfile, isdir, join, dirname, splitext
 from .pcskel import *
 from .pcmesh import *
-from .pcanim import open_pcanim, FLAG_LOOPING, FLAG_SCENE_ANIM
+from .pcanim import open_pcanim, FLAG_LOOPING, FLAG_SCENE_ANIM, GEN_ANIM
 
 created_first = False
-requested_pcmesh = ""
 skel_data = {}
 loaded_skel_path = ""
 
@@ -97,39 +96,14 @@ def _pcmesh_max_bone_count(pcmesh_path):
     return max_bone_count
 
 
-def _show_detected_pcskel_prompt(context, detected_skel_path):
-    detected_name = os.path.basename(detected_skel_path)
-
-    def draw(self, _context):
-        layout = self.layout
-        col = layout.column(align=True)
-        col.label(text="Import with detected matching PCSKEL?")
-        col.label(text=f"File: {detected_name}")
-        col.label(text=f"Path: {detected_skel_path}")
-        row = col.row(align=True)
-        use_detected = row.operator(OT_ImportDetectedPCSKEL.bl_idname, text="Yes")
-        use_detected.detected_skel_path = detected_skel_path
-        row.operator(OT_OpenFileBrowser.bl_idname, text="No")
-
-    context.window_manager.popup_menu(draw, title="Detected matching PCSKEL", icon='QUESTION')
-
-
-class OT_ImportDetectedPCSKEL(bpy.types.Operator):
-    bl_idname = "wm.import_detected_pcskel"
-    bl_label = "Import detected PCSKEL"
-
-    detected_skel_path: bpy.props.StringProperty(subtype="FILE_PATH")
-
-    def execute(self, context):
-        global requested_pcmesh
-        if not requested_pcmesh:
-            self.report({'ERROR'}, "No PCMESH import request is pending")
-            return {'CANCELLED'}
-        if not self.detected_skel_path or not Path(self.detected_skel_path).is_file():
-            self.report({'WARNING'}, "Detected PCSKEL is no longer available; choose one manually")
-            return bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
-        import_pcmesh(requested_pcmesh, self.detected_skel_path)
-        return {'FINISHED'}
+def _resolve_pcmesh_skeleton_action(force_show_selector, max_bone_count, detected_skel_path):
+    if force_show_selector:
+        return "selector", None
+    if max_bone_count <= 2:
+        return "none", None
+    if detected_skel_path:
+        return "auto", detected_skel_path
+    return "selector", None
 
 
 class OT_OpenFileBrowser(bpy.types.Operator):
@@ -137,23 +111,30 @@ class OT_OpenFileBrowser(bpy.types.Operator):
     bl_label = "Select a skeleton"
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.PCSKEL;*.pcskel", options={'HIDDEN'})
+    pcmesh_path: bpy.props.StringProperty(subtype="FILE_PATH")
 
     def execute(self, context):
-        global requested_pcmesh
-        if not requested_pcmesh:
+        pcmesh_path = str(self.pcmesh_path or "")
+        if not pcmesh_path:
             self.report({'ERROR'}, "No PCMESH import request is pending")
             return {'CANCELLED'}
 
         selected_skel_path = str(self.filepath or "")
         if not selected_skel_path:
-            requested_pcmesh = ""
             self.report({'INFO'}, "Skeleton selection cancelled")
             return {'CANCELLED'}
 
-        import_pcmesh(requested_pcmesh, selected_skel_path)
+        if not Path(selected_skel_path).is_file():
+            self.report({'ERROR'}, f"Selected PCSKEL was not found: {selected_skel_path}")
+            return {'CANCELLED'}
+
+        import_pcmesh(pcmesh_path, selected_skel_path)
         return {'FINISHED'}
 
     def invoke(self, context, event):
+        if self.pcmesh_path:
+            self.filepath = str(Path(self.pcmesh_path).with_suffix(".PCSKEL"))
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -589,22 +570,35 @@ class PCMESHImporter(bpy.types.Operator):
     bl_options = {'PRESET', 'UNDO'}
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    force_show_skeleton_selector: bpy.props.BoolProperty(
+        name="Force show skeleton import selector",
+        description="Always open the PCSKEL selector instead of auto-using a matching sibling PCSKEL or importing without a skeleton",
+        default=False,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "force_show_skeleton_selector")
 
     def execute(self, context):
-        global requested_pcmesh
-        requested_pcmesh = self.filepath
+        pcmesh_path = str(self.filepath or "")
+        max_bone_count = _pcmesh_max_bone_count(pcmesh_path)
+        detected_skel_path = _find_matching_pcskel_path(pcmesh_path)
+        action, selected_skel_path = _resolve_pcmesh_skeleton_action(
+            self.force_show_skeleton_selector,
+            max_bone_count,
+            detected_skel_path,
+        )
 
-        max_bone_count = _pcmesh_max_bone_count(requested_pcmesh)
-        if max_bone_count <= 2:
-            import_pcmesh(requested_pcmesh, skel_path=None)
+        if action == "none":
+            import_pcmesh(pcmesh_path, skel_path=None)
             return {'FINISHED'}
 
-        detected_skel_path = _find_matching_pcskel_path(requested_pcmesh)
-        if detected_skel_path:
-            _show_detected_pcskel_prompt(context, detected_skel_path)
+        if action == "auto":
+            import_pcmesh(pcmesh_path, selected_skel_path)
             return {'FINISHED'}
 
-        return bpy.ops.wm.open_pcskel('INVOKE_DEFAULT')
+        return bpy.ops.wm.open_pcskel('INVOKE_DEFAULT', pcmesh_path=pcmesh_path)
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -1172,7 +1166,11 @@ class PCANIMImporter(bpy.types.Operator):
             action["pcanim_scene_anim"] = bool(int(anim.get("flags", 0)) & FLAG_SCENE_ANIM)
             action["pcanim_skel_index"] = int(anim.get("skel_index", -1))
             action["pcanim_version"] = int(anim.get("version", 0))
-
+            if int(anim.get("version", 0)) == GEN_ANIM:
+                action["pcanim_generic_fps"] = float(anim.get("generic_fps", 0.0))
+                action["pcanim_generic_chunk_count"] = int(anim.get("generic_chunk_count", 0))
+                action["pcanim_generic_frames_per_chunk"] = int(anim.get("generic_frames_per_chunk", 0))
+                action["pcanim_generic_frame_stride"] = int(anim.get("generic_frame_stride", 0))
             decoded_components = anim.get("decoded_components", [])
             comp_ids = [int(c.get("comp_ix", -1)) for c in decoded_components]
             action["pcanim_component_ids"] = ",".join(str(i) for i in comp_ids)
@@ -1606,7 +1604,6 @@ def menu_func_export(self, context):
     self.layout.operator(PCMESHExporter.bl_idname, text="PCMESH (.pcmesh)")
 
 def register():
-    bpy.utils.register_class(OT_ImportDetectedPCSKEL)
     bpy.utils.register_class(OT_OpenFileBrowser)
     bpy.utils.register_class(PCMESHImporter)
     bpy.utils.register_class(PCANIMImporter)
@@ -1665,6 +1662,5 @@ def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.utils.unregister_class(OT_OpenFileBrowser)
-    bpy.utils.unregister_class(OT_ImportDetectedPCSKEL)
 if __name__ == "__main__":
     register()
