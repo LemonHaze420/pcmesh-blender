@@ -1535,7 +1535,6 @@ class PCMESHExporter(bpy.types.Operator):
         mesh = obj.data
         bpy.ops.object.mode_set(mode='OBJECT')
         mesh.calc_loop_triangles()
-        mesh.calc_normals_split()
 
         section_count = int(obj.get("pcmesh_section_count", 1))
         section_count = max(1, section_count)
@@ -1573,7 +1572,7 @@ class PCMESHExporter(bpy.types.Operator):
                     loop = mesh.loops[loop_idx]
                     v = mesh.vertices[loop.vertex_index]
                     pos_eng = _blender_to_engine_vec3((float(v.co.x), float(v.co.y), float(v.co.z)))
-                    nrm_eng = _blender_to_engine_vec3((float(loop.normal.x), float(loop.normal.y), float(loop.normal.z)))
+                    nrm_eng = _blender_to_engine_vec3((float(v.normal.x), float(v.normal.y), float(v.normal.z)))
                     if nrm_eng.length > 1e-12:
                         nrm_eng.normalize()
                     pos = (float(pos_eng.x), float(pos_eng.y), float(pos_eng.z))
