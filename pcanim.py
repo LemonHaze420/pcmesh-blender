@@ -10,7 +10,9 @@ try:
         _get_num_bytes_for_comp,
         _get_num_tracks_for_comp,
         _has_track,
+        _inspect_generic_body_control,
     )
+    from .pcanim_generic import evaluate_generic_animation
 except Exception:
     from pcanim_codec import (  # type: ignore
         PCANIMCodecError,
@@ -18,7 +20,9 @@ except Exception:
         _get_num_bytes_for_comp,
         _get_num_tracks_for_comp,
         _has_track,
+        _inspect_generic_body_control,
     )
+    from pcanim_generic import evaluate_generic_animation  # type: ignore
 
 
 ANIM_CONTAINER = 0x00010101
@@ -132,6 +136,50 @@ def _read_u32(blob, offset):
     if offset < 0 or offset + 4 > len(blob):
         raise PCANIMParseError(f"u32 out of range at 0x{offset:X}")
     return struct.unpack_from("<I", blob, offset)[0]
+
+
+def _parse_generic_common_header(blob, anim, skel_data):
+    base = int(anim.get("offset", 0))
+    common_off = base + 120
+    if common_off < 0 or common_off + 56 > len(blob):
+        return {}
+
+    common_bytes = blob[common_off : common_off + 56]
+    common_words = list(struct.unpack("<14I", common_bytes))
+    common_floats = list(struct.unpack("<14f", common_bytes))
+    active_mask_words = [int(v) for v in common_words[2:6]]
+    shared_scalar_words = [int(v) for v in common_words[6:14]]
+    shared_scalar_floats = [float(v) for v in common_floats[6:14]]
+
+    generic_components = list((skel_data or {}).get("generic_components", ()))
+    active_component_indices = []
+    inactive_component_indices = []
+    if active_mask_words and generic_components:
+        for comp in generic_components:
+            comp_ix = int(comp.get("component_index", -1))
+            if comp_ix < 0:
+                continue
+            word_ix = comp_ix // 32
+            if word_ix >= len(active_mask_words):
+                inactive_component_indices.append(comp_ix)
+                continue
+            bit_ix = comp_ix % 32
+            is_active = (active_mask_words[word_ix] & (1 << bit_ix)) != 0
+            if is_active:
+                active_component_indices.append(comp_ix)
+            else:
+                inactive_component_indices.append(comp_ix)
+
+    return {
+        "generic_common_header_off": int(common_off),
+        "generic_common_header_words": common_words,
+        "generic_common_header_floats": common_floats,
+        "generic_active_mask_words": active_mask_words,
+        "generic_shared_scalar_words": shared_scalar_words,
+        "generic_shared_scalar_floats": shared_scalar_floats,
+        "generic_active_component_indices": active_component_indices,
+        "generic_inactive_component_indices": inactive_component_indices,
+    }
 
 
 def _parse_debug_frame_set(raw_value):
@@ -290,11 +338,20 @@ def _build_component_slots(skel_data):
             for comp_ix in DEFAULT_COMP_ORDER
         ]
 
+    components = skel_data.get("components") or []
+    comp_by_slot = {}
+    for comp in components:
+        try:
+            comp_by_slot[int(comp.get("component_index", -1))] = comp
+        except Exception:
+            continue
+
     meta = skel_data.get("component_meta") or []
     if meta:
         slots = []
         for slot_ix, comp in enumerate(meta):
             ctype = int(comp.get("type", 0))
+            comp_rec = comp_by_slot.get(int(slot_ix), {})
             slots.append(
                 {
                     "slot_ix": int(slot_ix),
@@ -302,13 +359,15 @@ def _build_component_slots(skel_data):
                     "type_hash": int(ctype),
                     "flags": int(comp.get("flags", 0)),
                     "comp_ix": int(NAL_TO_COMP_ID.get(ctype, -1)),
+                    "quat_track_count": int(comp_rec.get("quat_track_count", 0)),
+                    "vector_track_count": int(comp_rec.get("vector_track_count", 0)),
                 }
             )
         if slots:
             return slots
 
-    components = skel_data.get("components") or []
     if components:
+
         slots = []
         for comp in components:
             ctype = int(comp.get("type_id", 0))
@@ -319,6 +378,8 @@ def _build_component_slots(skel_data):
                     "type_hash": int(ctype),
                     "flags": int(comp.get("component_flags", 0)),
                     "comp_ix": int(NAL_TO_COMP_ID.get(ctype, -1)),
+                    "quat_track_count": int(comp.get("quat_track_count", 0)),
+                    "vector_track_count": int(comp.get("vector_track_count", 0)),
                 }
             )
         if slots:
@@ -331,6 +392,8 @@ def _build_component_slots(skel_data):
             "type_hash": 0,
             "flags": 0,
             "comp_ix": int(comp_ix),
+            "quat_track_count": 0,
+            "vector_track_count": 0,
         }
         for comp_ix in DEFAULT_COMP_ORDER
     ]
@@ -387,15 +450,27 @@ def _decode_anim_components(blob, anim, comp_slots):
             track_ix += 1
             continue
 
+        mask_words = None
+        codec_ixs_abs = per_anim_data_offs + 4
         try:
             mask = _read_u32(blob, per_anim_data_offs)
+            if comp_ix == COMP_ARBITRARY_PO:
+                total_slots = max(0, int(slot.get("quat_track_count", 0))) + max(0, int(slot.get("vector_track_count", 0)))
+                word_count = max(1, (total_slots + 31) // 32) if total_slots > 0 else 1
+                mask_words = [
+                    _read_u32(blob, per_anim_data_offs + (word_ix * 4))
+                    for word_ix in range(word_count)
+                ]
+                if mask_words:
+                    mask = int(mask_words[0])
+                codec_ixs_abs = per_anim_data_offs + (4 * word_count)
         except PCANIMParseError as e:
             warnings.append(str(e))
             track_ix += 1
             continue
 
-        ntracks = _get_num_tracks_for_comp(comp_ix, mask)
-        codec_ixs_abs = per_anim_data_offs + 4
+        decode_mask = mask_words if mask_words is not None else mask
+        ntracks = _get_num_tracks_for_comp(comp_ix, decode_mask, slot)
         if codec_ixs_abs < 0 or codec_ixs_abs + ntracks > len(blob):
             warnings.append(
                 f"Anim '{anim.get('name', '')}' slot {slot_ix} comp {comp_ix}: codec table out of bounds"
@@ -405,7 +480,7 @@ def _decode_anim_components(blob, anim, comp_slots):
 
         codec_ixs = list(blob[codec_ixs_abs : codec_ixs_abs + ntracks])
 
-        encoded_size = _get_num_bytes_for_comp(comp_ix, mask)
+        encoded_size = _get_num_bytes_for_comp(comp_ix, decode_mask, slot)
         if encoded_size < 0:
             warnings.append(
                 f"Anim '{anim.get('name', '')}' slot {slot_ix} comp {comp_ix}: unsupported encoded size formula"
@@ -442,10 +517,11 @@ def _decode_anim_components(blob, anim, comp_slots):
                 comp_ix=comp_ix,
                 codec_ixs=codec_ixs,
                 encoded_data=encoded_data,
-                mask=mask,
+                mask=decode_mask,
                 frame_count=frame_count,
                 current_time=current_time,
                 is_scene_anim=is_scene_anim,
+                track_meta=slot,
             )
         except PCANIMCodecError as e:
             decode_error = str(e)
@@ -465,6 +541,7 @@ def _decode_anim_components(blob, anim, comp_slots):
                 "codec_ixs": codec_ixs,
                 "track_data_offset": int(track_data_abs),
                 "encoded_size": int(encoded_size),
+                "mask_words": list(mask_words) if mask_words is not None else None,
                 "frames": frames,
                 "decode_error": decode_error,
             }
@@ -566,6 +643,9 @@ def open_pcanim(
             anim["runtime_frame_world_engine"] = {}
             anim["runtime_default_world_engine"] = {}
             anim["runtime_parent_by_bone"] = {}
+            anim["runtime_frame_local_quat_engine"] = {}
+            anim["runtime_frame_local_quat_blender"] = {}
+            anim["runtime_local_finalize_meta"] = {}
             anim["decode_warnings"] = [
                 f"Anim '{anim.get('name', '')}' has unsupported version 0x{anim_version:08X}"
             ]
@@ -578,8 +658,32 @@ def open_pcanim(
             anim["runtime_frame_world_engine"] = {}
             anim["runtime_default_world_engine"] = {}
             anim["runtime_parent_by_bone"] = {}
+            anim["runtime_frame_local_quat_engine"] = {}
+            anim["runtime_frame_local_quat_blender"] = {}
+            anim["runtime_local_finalize_meta"] = {}
             anim["bone_tracks"] = {}
-            anim["generic_animation_wip"] = True
+            anim.update(_parse_generic_common_header(blob, anim, skel_data))
+            anim.update(_inspect_generic_body_control(blob, anim, skel_data))
+            generic_result = evaluate_generic_animation(anim, skel_data, blob)
+            anim["bone_tracks"] = dict(generic_result.get("bone_tracks", {}) or {})
+            anim["decode_warnings"] = list(generic_result.get("decode_warnings", []) or [])
+            anim["runtime_frame_world_engine"] = dict(generic_result.get("runtime_frame_world_engine", {}) or {})
+            anim["runtime_default_world_engine"] = dict(generic_result.get("runtime_default_world_engine", {}) or {})
+            anim["runtime_parent_by_bone"] = dict(generic_result.get("runtime_parent_by_bone", {}) or {})
+            for key, value in generic_result.items():
+                if key in (
+                    "bone_tracks",
+                    "decode_warnings",
+                    "runtime_frame_world_engine",
+                    "runtime_default_world_engine",
+                    "runtime_parent_by_bone",
+                ):
+                    continue
+                anim[key] = value
+            anim["generic_animation_wip"] = not bool(anim["runtime_frame_world_engine"] or anim["bone_tracks"])
+            partial_note = str(generic_result.get("generic_partial_playback_note", "")).strip()
+            if partial_note:
+                anim["generic_partial_playback_note"] = partial_note
             continue
 
         components, warnings = _decode_anim_components(blob, anim, comp_slots)
@@ -600,6 +704,9 @@ def open_pcanim(
         anim["runtime_frame_world_engine"] = {}
         anim["runtime_default_world_engine"] = {}
         anim["runtime_parent_by_bone"] = {}
+        anim["runtime_frame_local_quat_engine"] = {}
+        anim["runtime_frame_local_quat_blender"] = {}
+        anim["runtime_local_finalize_meta"] = {}
         runtime_capture = {}
 
         if skel_data:
@@ -616,6 +723,9 @@ def open_pcanim(
             anim["runtime_frame_world_engine"] = runtime_capture.get("frame_world_engine", {})
             anim["runtime_default_world_engine"] = runtime_capture.get("default_world_engine", {})
             anim["runtime_parent_by_bone"] = runtime_capture.get("parent_by_bone", {})
+            anim["runtime_frame_local_quat_engine"] = runtime_capture.get("frame_local_quat_engine", {})
+            anim["runtime_frame_local_quat_blender"] = runtime_capture.get("frame_local_quat_blender", {})
+            anim["runtime_local_finalize_meta"] = runtime_capture.get("local_finalize_meta", {})
         else:
             anim["bone_tracks"] = {}
 

@@ -362,7 +362,8 @@ def _components_to_bone_tracks(
         arbitrary_default_positions[i] if i < len(arbitrary_default_positions) else (0.0, 0.0, 0.0)
         for i in range(max(arbitrary_vector_track_count, len(arbitrary_default_positions)))
     ]
-
+    arbitrary_quat_bit_count = max(0, int(arbitrary_quat_track_count))
+    arbitrary_total_slot_count = max(0, int(arbitrary_quat_track_count)) + max(0, int(arbitrary_vector_track_count))
 
     torso_bones = list(torso_comp.get("bone_indices", ())) if torso_comp else []
     torso_type_id = int(torso_comp.get("type_id", 0)) if torso_comp else 0
@@ -419,6 +420,28 @@ def _components_to_bone_tracks(
         if bone_id is None:
             return False
         return int(bone_id) in rest_local_quat_map
+
+    def _arbitrary_fallback_quat_for_node(node):
+        quat_ix = int(node.get("quat_index", -1))
+        use_std_pose_quat = bool(node.get("use_std_pose_quat", False))
+        if use_std_pose_quat and 0 <= quat_ix < len(arbitrary_default_quats):
+            return _quat_normalize_wxyz(arbitrary_default_quats[quat_ix])
+        if 0 <= quat_ix < len(arbitrary_skel_quats):
+            return _quat_normalize_wxyz(arbitrary_skel_quats[quat_ix])
+        return None
+
+    def _iter_arbitrary_mask_bits(mask_value):
+        if isinstance(mask_value, (list, tuple)):
+            words = [int(v) & 0xFFFFFFFF for v in mask_value]
+        else:
+            words = [int(mask_value) & 0xFFFFFFFF]
+        needed = max(1, (arbitrary_total_slot_count + 31) // 32) if arbitrary_total_slot_count > 0 else 1
+        if len(words) < needed:
+            words.extend([0] * (needed - len(words)))
+        for bit in range(arbitrary_total_slot_count):
+            if words[bit >> 5] & (1 << (bit & 31)):
+                yield bit
+
 
     raw_parent_map = skel_data.get("parent_map", {}) if isinstance(skel_data, dict) else {}
     skel_parent_map = {}
@@ -1422,7 +1445,6 @@ def _components_to_bone_tracks(
             str(int(role)): [float(q[0]), float(q[1]), float(q[2]), float(q[3])]
             for role, q in arms_local_correction_by_role.items()
         }
-
     pose_parent_by_bone = {}
     pose_default_quat = {}
     pose_delta_order = {}
@@ -2651,18 +2673,18 @@ def _components_to_bone_tracks(
                 frame_mats = _frame_map(frame_no)
                 frame_applied = False
 
-                for bit in range(16):
-                    if (mask & (1 << bit)) == 0:
-                        continue
+                mask_words = comp.get("mask_words") if isinstance(comp, dict) else None
+                active_mask = mask_words if mask_words is not None else mask
+                for bit in _iter_arbitrary_mask_bits(active_mask):
                     xyz, cursor = _consume_xyz(values, cursor)
                     if xyz is None:
                         break
-                    if bit < 12:
+                    if bit < arbitrary_quat_bit_count:
                         if bit < len(arbitrary_state_quats):
                             arbitrary_state_quats[bit] = _quat_from_xyz(*xyz)
                             frame_applied = True
                     else:
-                        pos_ix = bit - 12
+                        pos_ix = bit - arbitrary_quat_bit_count
                         if pos_ix < len(arbitrary_state_positions):
                             arbitrary_state_positions[pos_ix] = tuple(float(v) for v in xyz)
                             frame_applied = True
@@ -2683,8 +2705,10 @@ def _components_to_bone_tracks(
                         use_std_pose_quat = bool(node.get("use_std_pose_quat", False))
                         use_std_pose_pos = bool(node.get("use_std_pose_pos", False))
 
-                        if use_std_pose_quat:
-                            fallback_quat = arbitrary_default_quats[quat_ix] if 0 <= quat_ix < len(arbitrary_default_quats) else None
+                        fallback_quat = _arbitrary_fallback_quat_for_node(node)
+                        has_component_quat = fallback_quat is not None
+
+                        if has_component_quat:
                             _assign_parent_space_rot(
                                 bone_tracks,
                                 bid,
@@ -2997,7 +3021,6 @@ def _components_to_bone_tracks(
                 _set_runtime_parent(tip_id, mid_id)
 
         _set_finger_chain(fing52_bones, fing52_other)
-
 
         for bid in sorted(runtime_bone_ids):
             if bid in parent_by_bone:

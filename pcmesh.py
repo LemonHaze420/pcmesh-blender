@@ -736,18 +736,43 @@ class UserMeshData:
 
 
 class SectionExportData:
-    def __init__(self, vertices, triangles, uvs, normals, bone_indices=None, bone_weights=None):
+    def __init__(
+        self,
+        vertices,
+        triangles,
+        uvs,
+        normals,
+        bone_indices=None,
+        bone_weights=None,
+        source_vertex_indices=None,
+        template_section_index=None,
+        section_name="",
+        material_name="",
+        material_texture="",
+        material_offset=0,
+    ):
         self.vertices = vertices
         self.triangles = triangles
         self.uvs = uvs
         self.normals = normals
         self.bone_indices = bone_indices or []
         self.bone_weights = bone_weights or []
+        self.source_vertex_indices = list(source_vertex_indices or [])
+        self.template_section_index = None if template_section_index is None else int(template_section_index)
+        self.section_name = str(section_name or "")
+        self.material_name = str(material_name or "")
+        self.material_texture = str(material_texture or "")
+        self.material_offset = int(material_offset or 0)
 
 
 class MeshExportData:
-    def __init__(self, sections):
+    def __init__(self, mesh_name, sections, mesh_bone_rows=None, unchanged=False, unchanged_sections=None, warnings=None):
+        self.mesh_name = str(mesh_name or "")
         self.sections = sections
+        self.mesh_bone_rows = [list(rows) for rows in (mesh_bone_rows or [])]
+        self.unchanged = bool(unchanged)
+        self.unchanged_sections = tuple(int(idx) for idx in (unchanged_sections or ()))
+        self.warnings = tuple(str(item) for item in (warnings or ()))
 
 class MeshData:
     """Class to store parsed mesh data."""
@@ -755,13 +780,28 @@ class MeshData:
         self.name = name
         self.sections = []
         self.bones = []
+        self.material_catalog = []
 
-    def add_section(self, name, section_name, primitive_type, vertices, uvs, normals, indices, materials, bones=None):
+    def add_section(
+        self,
+        name,
+        section_name,
+        primitive_type,
+        vertices,
+        uvs,
+        normals,
+        indices,
+        bones=None,
+        material_entry=None,
+        source_section_index=None,
+        stride=None,
+    ):
+        material_entry = dict(material_entry or {})
         section_data = {
             "name": name,
             "section_name": (
                 section_name if section_name not in (None, "", b"", b"\x00")
-                else (materials[0][0].decode("utf-8").rstrip("\x00") if materials else name)
+                else (material_entry.get("name") or name)
             ),
             "primitive_type": primitive_type,
             "vertices": vertices,
@@ -769,7 +809,12 @@ class MeshData:
             "normals": normals,
             "indices": indices,
             "bones": bones,
-            "materials": materials
+            "material_entry": material_entry or None,
+            "material_name": str(material_entry.get("name", "") or ""),
+            "material_texture": str(material_entry.get("texture_name", "") or ""),
+            "material_offset": int(material_entry.get("offset", 0) or 0),
+            "source_section_index": None if source_section_index is None else int(source_section_index),
+            "stride": None if stride is None else int(stride),
         }
         self.sections.append(section_data)
 
@@ -801,6 +846,24 @@ def _iter_directory_entries(buffer_bytes, header):
         yield i, offset, entry
 
 
+def _resolve_section_material_entry(materials, section_name, material_offset):
+    wanted_offset = int(material_offset or 0)
+    if wanted_offset > 0:
+        for entry in materials:
+            try:
+                if int(entry.get("offset", 0) or 0) == wanted_offset:
+                    return dict(entry)
+            except Exception:
+                continue
+
+    wanted_name = str(section_name or "").strip()
+    if wanted_name:
+        for entry in materials:
+            if str(entry.get("name", "")).strip() == wanted_name:
+                return dict(entry)
+
+    return None
+
 def _find_mesh_entry(buffer_bytes, header, mesh_name=None):
     fallback = None
     desired = (mesh_name or "").lower()
@@ -816,6 +879,81 @@ def _find_mesh_entry(buffer_bytes, header, mesh_name=None):
     return fallback
 
 
+def _decode_original_section_payload(buffer_bytes, sec, palette):
+    stride = int(sec.m_stride)
+    vertex_offset = int(sec.VertexBuffer.m_vertexData)
+    vertex_count = int(sec.NVertices)
+    if vertex_count <= 0:
+        return {
+            "vertices": [],
+            "uvs": [],
+            "normals": [],
+            "bones": [],
+        }
+
+    if stride == 64:
+        class VertexData(Structure):
+            _fields_ = [
+                ("pos", c_float * 3),
+                ("normal", c_float * 3),
+                ("uv", c_float * 2),
+                ("bone_indices", c_float * 4),
+                ("bone_weights", c_float * 4),
+            ]
+
+        assert(sizeof(VertexData) == 0x40)
+    elif stride == 12:
+        class VertexData(Structure):
+            _fields_ = [("pos", c_float * 3)]
+
+        assert(sizeof(VertexData) == 0x0C)
+    elif stride in (24, 32, 60):
+        class VertexData(Structure):
+            _fields_ = [
+                ("pos", c_float * 3),
+                ("uv", c_float * 2),
+                ("ff", c_uint32),
+                ("tail", c_ubyte * (stride - 24)),
+            ]
+
+        assert(sizeof(VertexData) == stride)
+    else:
+        raise ValueError(f"Unsupported stride value: {stride}")
+
+    vertex_data_t = VertexData * vertex_count
+    vertex_data = vertex_data_t.from_buffer_copy(
+        buffer_bytes[vertex_offset : vertex_offset + sizeof(vertex_data_t)]
+    )
+
+    vertices = []
+    uvs = []
+    normals = []
+    bones = []
+    for vtx in vertex_data:
+        vertices.append((round(vtx.pos[0], 6), round(vtx.pos[1], 6), round(vtx.pos[2], 6)))
+        if hasattr(vtx, "uv"):
+            uvs.append(tuple(vtx.uv))
+        if hasattr(vtx, "normal"):
+            normals.append(tuple(vtx.normal))
+
+    if stride == 64:
+        for vtx in vertex_data:
+            local_idxs = [int(x) for x in vtx.bone_indices]
+            weights = [float(x) for x in vtx.bone_weights]
+            if palette:
+                mapped = [int(palette[idx]) if 0 <= idx < len(palette) else int(idx) for idx in local_idxs]
+            else:
+                mapped = local_idxs
+            bones.append({"indices": mapped, "weights": weights})
+
+    return {
+        "vertices": vertices,
+        "uvs": uvs,
+        "normals": normals,
+        "bones": bones,
+    }
+
+
 def _read_section_descriptors(buffer_bytes, mesh):
     sections_t = Section * int(mesh.NSections)
     sections = sections_t.from_buffer_copy(
@@ -826,18 +964,33 @@ def _read_section_descriptors(buffer_bytes, mesh):
     for idx, section in enumerate(sections):
         sec_off = section.Section
         sec = nglMeshSection.from_buffer_copy(buffer_bytes[sec_off : sec_off + sizeof(nglMeshSection)])
+
+        raw_index_bytes = b""
         orig_indices = []
         if sec.NIndices > 0 and sec.m_indices:
+            raw_index_bytes = bytes(buffer_bytes[sec.m_indices : sec.m_indices + int(sec.NIndices) * 2])
             t_idx = c_ushort * int(sec.NIndices)
             orig_indices = list(
                 t_idx.from_buffer_copy(
                     buffer_bytes[sec.m_indices : sec.m_indices + sizeof(t_idx)]
                 )
             )
+
+        raw_palette_bytes = b""
         palette = []
         if sec.NBones > 0 and sec.BonesIdx:
+            raw_palette_bytes = bytes(buffer_bytes[sec.BonesIdx : sec.BonesIdx + int(sec.NBones) * 2])
             t = c_ushort * int(sec.NBones)
             palette = list(t.from_buffer_copy(buffer_bytes[sec.BonesIdx : sec.BonesIdx + sizeof(t)]))
+
+        raw_vertex_bytes = bytes(
+            buffer_bytes[
+                sec.VertexBuffer.m_vertexData : sec.VertexBuffer.m_vertexData + int(sec.VertexBuffer.Size)
+            ]
+        )
+        original_payload = _decode_original_section_payload(buffer_bytes, sec, palette)
+        original_payload["triangles"] = _triangles_from_indices(orig_indices, int(sec.m_primitiveType))
+
         result.append({
             "index": idx,
             "offset": sec_off,
@@ -847,29 +1000,53 @@ def _read_section_descriptors(buffer_bytes, mesh):
             "orig_indices": orig_indices,
             "orig_nverts": int(sec.NVertices),
             "orig_nidx": int(sec.NIndices),
+            "raw_vertex_bytes": raw_vertex_bytes,
+            "raw_index_bytes": raw_index_bytes,
+            "raw_palette_bytes": raw_palette_bytes,
+            "original_payload": original_payload,
         })
     return result
 
 
 def _validate_mesh_layout(buffer_bytes, mesh):
-    sections = _read_section_descriptors(buffer_bytes, mesh)
     size = len(buffer_bytes)
+    section_count = int(mesh.NSections)
+    sections_offset = int(mesh.Sections)
+    if section_count < 0:
+        raise ValueError("Mesh section count is negative")
+    if section_count > 0:
+        sections_size = sizeof(Section * section_count)
+        if sections_offset <= 0 or sections_offset + sections_size > size:
+            raise ValueError("Mesh sections table is out of file bounds")
 
+    bone_count = int(mesh.NBones)
+    bones_offset = int(mesh.Bones)
+    if bone_count < 0:
+        raise ValueError("Mesh bone count is negative")
+    if bone_count > 0:
+        bones_size = bone_count * 64
+        if bones_offset <= 0 or bones_offset + bones_size > size:
+            raise ValueError("Mesh bone table is out of file bounds")
+
+    sections = _read_section_descriptors(buffer_bytes, mesh)
     for item in sections:
         sec = item["section"]
+
+        palette_off = int(sec.BonesIdx)
+        palette_count = int(sec.NBones)
+        if palette_count > 0 and (palette_off <= 0 or palette_off + palette_count * 2 > size):
+            raise ValueError(f"Section {item['index']} bone palette is out of file bounds")
+
         v_off = int(sec.VertexBuffer.m_vertexData)
         v_size = int(sec.VertexBuffer.Size)
         if v_off < 0 or v_off + v_size > size:
             raise ValueError(f"Section {item['index']} vertex buffer is out of file bounds")
-
         if int(sec.m_stride) * int(sec.NVertices) != v_size:
             raise ValueError(f"Section {item['index']} has invalid vertex size/stride relationship")
 
         i_off = int(sec.m_indices)
         i_count = int(sec.NIndices)
-        if i_count == 0:
-            continue
-        if i_off <= 0 or i_off + i_count * 2 > size:
+        if i_count > 0 and (i_off <= 0 or i_off + i_count * 2 > size):
             raise ValueError(f"Section {item['index']} index buffer is out of file bounds")
 
 
@@ -978,6 +1155,14 @@ def _triangles_to_strip_indices(triangles):
     return fallback
 
 
+def _triangles_from_indices(indices, primitive_type):
+    if primitive_type == 5:
+        return _triangles_from_strip_indices(indices)
+    if primitive_type == 4:
+        return [tuple(indices[i : i + 3]) for i in range(0, len(indices), 3)]
+    raise ValueError(f"Unsupported primitive type {primitive_type}")
+
+
 def _triangles_from_strip_indices(indices):
     tris = []
     for i in range(len(indices) - 2):
@@ -994,7 +1179,6 @@ def _triangles_from_strip_indices(indices):
 def _triangle_multiset(tris):
     return sorted(tuple(sorted(t)) for t in tris)
 
-
 def _normalize_weights(weights):
     total = sum(weights)
     if total <= 1e-8:
@@ -1002,11 +1186,112 @@ def _normalize_weights(weights):
     return [w / total for w in weights]
 
 
+def _float_tuple_close(left, right, eps=1e-6):
+    if len(left) != len(right):
+        return False
+    return all(abs(float(a) - float(b)) <= eps for a, b in zip(left, right))
+
+
+def _get_source_vertex_index(payload, vertex_index):
+    source_vertex_indices = getattr(payload, "source_vertex_indices", None)
+    if not source_vertex_indices:
+        return None
+    if len(source_vertex_indices) != len(payload.vertices):
+        raise ValueError("Section source-vertex mapping length does not match vertex count")
+    source_vertex_index = source_vertex_indices[vertex_index]
+    if source_vertex_index is None:
+        return None
+    return int(source_vertex_index)
+
+
+def _get_original_vertex_state(section_desc, source_vertex_index):
+    original = section_desc["original_payload"]
+    if source_vertex_index is None:
+        return None, None, None, None
+    if source_vertex_index < 0 or source_vertex_index >= len(original["vertices"]):
+        raise ValueError(f"Section {section_desc['index']} source vertex {source_vertex_index} is out of bounds")
+    pos = original["vertices"][source_vertex_index]
+    uv = original["uvs"][source_vertex_index] if source_vertex_index < len(original["uvs"]) else None
+    normal = original["normals"][source_vertex_index] if source_vertex_index < len(original["normals"]) else None
+    bone = original["bones"][source_vertex_index] if source_vertex_index < len(original["bones"]) else None
+    return pos, uv, normal, bone
+
+
+def _get_original_vertex_bytes(section_desc, source_vertex_index):
+    if source_vertex_index is None:
+        return None
+    stride = int(section_desc["section"].m_stride)
+    raw_vertex_bytes = section_desc["raw_vertex_bytes"]
+    start = source_vertex_index * stride
+    end = start + stride
+    if source_vertex_index < 0 or end > len(raw_vertex_bytes):
+        raise ValueError(f"Section {section_desc['index']} source vertex {source_vertex_index} byte range is out of bounds")
+    return bytearray(raw_vertex_bytes[start:end])
+
+
+def _payload_matches_original(section_desc, payload, export_palette):
+    sec = section_desc["section"]
+    stride = int(sec.m_stride)
+    primitive_type = int(sec.m_primitiveType)
+    original = section_desc["original_payload"]
+    original_palette = [int(bone_id) for bone_id in section_desc["palette"]]
+
+    if export_palette != original_palette:
+        return False
+    if len(payload.vertices) != len(original["vertices"]):
+        return False
+    if len(payload.triangles) != len(original["triangles"]):
+        return False
+
+    for left, right in zip(payload.vertices, original["vertices"]):
+        if left is None or not _float_tuple_close(left, right):
+            return False
+
+    if stride != 12:
+        if len(payload.uvs) != len(original["uvs"]):
+            return False
+        for left, right in zip(payload.uvs, original["uvs"]):
+            original_blender_uv = (float(right[0]), 1.0 - float(right[1]))
+            if left is None or not _float_tuple_close(left, original_blender_uv):
+                return False
+
+    if stride == 64:
+        if len(payload.normals) != len(original["normals"]):
+            return False
+        if len(payload.bone_indices) != len(original["bones"]):
+            return False
+        if len(payload.bone_weights) != len(original["bones"]):
+            return False
+
+        for left, right in zip(payload.normals, original["normals"]):
+            if left is None or not _float_tuple_close(left, right):
+                return False
+
+        for bone_indices, bone_weights, original_bone in zip(
+            payload.bone_indices,
+            payload.bone_weights,
+            original["bones"],
+        ):
+            if bone_indices is None or bone_weights is None:
+                return False
+            if tuple(int(v) for v in bone_indices[:4]) != tuple(int(v) for v in original_bone["indices"][:4]):
+                return False
+            if not _float_tuple_close(bone_weights[:4], original_bone["weights"][:4]):
+                return False
+
+    payload_triangles = [tuple(int(v) for v in tri) for tri in payload.triangles]
+    original_triangles = [tuple(int(v) for v in tri) for tri in original["triangles"]]
+    if primitive_type == 5:
+        return _triangle_multiset(payload_triangles) == _triangle_multiset(original_triangles)
+    return payload_triangles == original_triangles
+
+
 def _build_section_payload(section_desc, payload):
     sec = section_desc["section"]
     stride = int(sec.m_stride)
     prim = int(sec.m_primitiveType)
-    palette = section_desc["palette"]
+    export_palette = [int(bone_id) for bone_id in section_desc["palette"]]
+    palette_lookup = {bone_id: idx for idx, bone_id in enumerate(export_palette)}
 
     if len(payload.vertices) != len(payload.uvs):
         raise ValueError(f"Section {section_desc['index']} has mismatched vertex/uv counts")
@@ -1037,77 +1322,252 @@ def _build_section_payload(section_desc, payload):
         if len(payload.bone_indices) != len(payload.vertices) or len(payload.bone_weights) != len(payload.vertices):
             raise ValueError(f"Section {section_desc['index']} requires skinning data for all vertices")
         vbytes = bytearray()
-        for i, pos in enumerate(payload.vertices):
-            nrm = payload.normals[i] if payload.normals else (0.0, 1.0, 0.0)
-            uv = payload.uvs[i]
-            src_idx = list(payload.bone_indices[i][:4])
-            src_w = list(payload.bone_weights[i][:4])
-            while len(src_idx) < 4:
-                src_idx.append(0)
-                src_w.append(0.0)
+        for i in range(len(payload.vertices)):
+            source_vertex_index = _get_source_vertex_index(payload, i)
+            original_pos, original_uv, original_normal, original_bone = _get_original_vertex_state(section_desc, source_vertex_index)
+            vertex_bytes = _get_original_vertex_bytes(section_desc, source_vertex_index)
+            if vertex_bytes is None:
+                vertex_bytes = bytearray(64)
 
-            local_idx = []
-            for j, bone_id in enumerate(src_idx):
-                if bone_id < 0 or src_w[j] <= 0.0:
-                    local_idx.append(0.0)
-                    src_w[j] = 0.0
-                    continue
-                if palette:
-                    if bone_id not in palette:
-                        raise ValueError(
-                            f"Section {section_desc['index']} uses bone {bone_id} not in palette"
-                        )
-                    local_idx.append(float(palette.index(bone_id)))
+            pos = payload.vertices[i]
+            if pos is None:
+                if original_pos is None:
+                    raise ValueError(f"Section {section_desc['index']} vertex {i} is missing position data")
+                pos = original_pos
+            elif original_pos is None or not _float_tuple_close(pos, original_pos):
+                struct.pack_into("<3f", vertex_bytes, 0, float(pos[0]), float(pos[1]), float(pos[2]))
+
+            nrm = payload.normals[i] if payload.normals else None
+            if nrm is None:
+                if original_normal is None:
+                    nrm = (0.0, 1.0, 0.0)
                 else:
-                    local_idx.append(float(bone_id))
+                    nrm = original_normal
+            if original_normal is None or not _float_tuple_close(nrm, original_normal):
+                struct.pack_into("<3f", vertex_bytes, 12, float(nrm[0]), float(nrm[1]), float(nrm[2]))
 
-            src_w = _normalize_weights(src_w)
-            vbytes.extend(struct.pack(
-                "<3f3f2f4f4f",
-                float(pos[0]), float(pos[1]), float(pos[2]),
-                float(nrm[0]), float(nrm[1]), float(nrm[2]),
-                float(uv[0]), 1.0 - float(uv[1]),
-                float(local_idx[0]), float(local_idx[1]), float(local_idx[2]), float(local_idx[3]),
-                float(src_w[0]), float(src_w[1]), float(src_w[2]), float(src_w[3]),
-            ))
+            uv = payload.uvs[i] if payload.uvs else None
+            original_blender_uv = None if original_uv is None else (float(original_uv[0]), 1.0 - float(original_uv[1]))
+            if uv is None:
+                uv = original_blender_uv if original_blender_uv is not None else (0.0, 0.0)
+            if original_blender_uv is None or not _float_tuple_close(uv, original_blender_uv):
+                struct.pack_into("<2f", vertex_bytes, 24, float(uv[0]), 1.0 - float(uv[1]))
+
+            src_idx = payload.bone_indices[i] if i < len(payload.bone_indices) else None
+            src_w = payload.bone_weights[i] if i < len(payload.bone_weights) else None
+            if src_idx is None or src_w is None:
+                if original_bone is None:
+                    src_idx = (0, 0, 0, 0)
+                    src_w = (1.0, 0.0, 0.0, 0.0)
+                else:
+                    src_idx = None
+                    src_w = None
+
+            if src_idx is not None and src_w is not None:
+                src_idx = list(src_idx[:4])
+                src_w = list(src_w[:4])
+                while len(src_idx) < 4:
+                    src_idx.append(0)
+                    src_w.append(0.0)
+
+                local_idx = []
+                for j, bone_id in enumerate(src_idx):
+                    bone_id = int(bone_id)
+                    if bone_id < 0 or src_w[j] <= 0.0:
+                        local_idx.append(0.0)
+                        src_w[j] = 0.0
+                        continue
+
+                    if bone_id not in palette_lookup:
+                        palette_lookup[bone_id] = len(export_palette)
+                        export_palette.append(bone_id)
+                    local_idx.append(float(palette_lookup[bone_id]))
+
+                src_w = _normalize_weights(src_w)
+                original_indices = tuple(int(v) for v in (original_bone or {}).get("indices", [])[:4])
+                original_weights = tuple(float(v) for v in (original_bone or {}).get("weights", [])[:4])
+                if original_bone is None or tuple(int(v) for v in src_idx[:4]) != original_indices or not _float_tuple_close(src_w[:4], original_weights):
+                    struct.pack_into(
+                        "<4f4f",
+                        vertex_bytes,
+                        32,
+                        float(local_idx[0]), float(local_idx[1]), float(local_idx[2]), float(local_idx[3]),
+                        float(src_w[0]), float(src_w[1]), float(src_w[2]), float(src_w[3]),
+                    )
+
+            vbytes.extend(vertex_bytes)
     elif stride == 12:
         vbytes = bytearray()
-        for pos in payload.vertices:
-            vbytes.extend(struct.pack(
-                "<3f",
-                float(pos[0]), float(pos[1]), float(pos[2]),
-            ))
+        for i in range(len(payload.vertices)):
+            source_vertex_index = _get_source_vertex_index(payload, i)
+            original_pos, _, _, _ = _get_original_vertex_state(section_desc, source_vertex_index)
+            vertex_bytes = _get_original_vertex_bytes(section_desc, source_vertex_index)
+            if vertex_bytes is None:
+                vertex_bytes = bytearray(12)
+
+            pos = payload.vertices[i]
+            if pos is None:
+                if original_pos is None:
+                    raise ValueError(f"Section {section_desc['index']} vertex {i} is missing position data")
+                pos = original_pos
+            if original_pos is None or not _float_tuple_close(pos, original_pos):
+                struct.pack_into("<3f", vertex_bytes, 0, float(pos[0]), float(pos[1]), float(pos[2]))
+
+            vbytes.extend(vertex_bytes)
     elif stride == 24:
         vbytes = bytearray()
-        for i, pos in enumerate(payload.vertices):
-            uv = payload.uvs[i] if payload.uvs else (0.0, 0.0)
-            vbytes.extend(struct.pack(
-                "<3f2fI",
-                float(pos[0]), float(pos[1]), float(pos[2]),
-                float(uv[0]), 1.0 - float(uv[1]),
-                0xFFFFFFFF,
-            ))
+        for i in range(len(payload.vertices)):
+            source_vertex_index = _get_source_vertex_index(payload, i)
+            original_pos, original_uv, _, _ = _get_original_vertex_state(section_desc, source_vertex_index)
+            vertex_bytes = _get_original_vertex_bytes(section_desc, source_vertex_index)
+            if vertex_bytes is None:
+                vertex_bytes = bytearray(struct.pack("<3f2fI", 0.0, 0.0, 0.0, 0.0, 1.0, 0xFFFFFFFF))
+
+            pos = payload.vertices[i]
+            if pos is None:
+                if original_pos is None:
+                    raise ValueError(f"Section {section_desc['index']} vertex {i} is missing position data")
+                pos = original_pos
+            if original_pos is None or not _float_tuple_close(pos, original_pos):
+                struct.pack_into("<3f", vertex_bytes, 0, float(pos[0]), float(pos[1]), float(pos[2]))
+
+            uv = payload.uvs[i] if payload.uvs else None
+            original_blender_uv = None if original_uv is None else (float(original_uv[0]), 1.0 - float(original_uv[1]))
+            if uv is None:
+                uv = original_blender_uv if original_blender_uv is not None else (0.0, 0.0)
+            if original_blender_uv is None or not _float_tuple_close(uv, original_blender_uv):
+                struct.pack_into("<2f", vertex_bytes, 12, float(uv[0]), 1.0 - float(uv[1]))
+
+            vbytes.extend(vertex_bytes)
     elif stride in (32, 60):
         vbytes = bytearray()
-        tail = b"\x00" * (stride - 24)
-        for i, pos in enumerate(payload.vertices):
-            uv = payload.uvs[i] if payload.uvs else (0.0, 0.0)
-            vbytes.extend(struct.pack(
-                "<3f2fI",
-                float(pos[0]), float(pos[1]), float(pos[2]),
-                float(uv[0]), 1.0 - float(uv[1]),
-                0xFFFFFFFF,
-            ))
-            vbytes.extend(tail)
+        for i in range(len(payload.vertices)):
+            source_vertex_index = _get_source_vertex_index(payload, i)
+            original_pos, original_uv, _, _ = _get_original_vertex_state(section_desc, source_vertex_index)
+            vertex_bytes = _get_original_vertex_bytes(section_desc, source_vertex_index)
+            if vertex_bytes is None:
+                vertex_bytes = bytearray(stride)
+                struct.pack_into("<I", vertex_bytes, 20, 0xFFFFFFFF)
+
+            pos = payload.vertices[i]
+            if pos is None:
+                if original_pos is None:
+                    raise ValueError(f"Section {section_desc['index']} vertex {i} is missing position data")
+                pos = original_pos
+            if original_pos is None or not _float_tuple_close(pos, original_pos):
+                struct.pack_into("<3f", vertex_bytes, 0, float(pos[0]), float(pos[1]), float(pos[2]))
+
+            uv = payload.uvs[i] if payload.uvs else None
+            original_blender_uv = None if original_uv is None else (float(original_uv[0]), 1.0 - float(original_uv[1]))
+            if uv is None:
+                uv = original_blender_uv if original_blender_uv is not None else (0.0, 0.0)
+            if original_blender_uv is None or not _float_tuple_close(uv, original_blender_uv):
+                struct.pack_into("<2f", vertex_bytes, 12, float(uv[0]), 1.0 - float(uv[1]))
+
+            vbytes.extend(vertex_bytes)
     else:
         raise ValueError(f"Unsupported section stride {stride} in section {section_desc['index']}")
 
     ibytes = b"" if len(flat_indices) == 0 else struct.pack("<" + "H" * len(flat_indices), *flat_indices)
-    return vbytes, ibytes, len(payload.vertices), len(flat_indices)
+    palette_bytes = b"" if len(export_palette) == 0 else struct.pack("<" + "H" * len(export_palette), *export_palette)
+
+    if _payload_matches_original(section_desc, payload, export_palette):
+        vbytes = section_desc["raw_vertex_bytes"]
+        ibytes = section_desc["raw_index_bytes"]
+        palette_bytes = section_desc["raw_palette_bytes"]
+
+    return vbytes, ibytes, palette_bytes, len(payload.vertices), len(flat_indices), export_palette
+
+
+def _set_vector4d(target, values):
+    for idx, value in enumerate(values[:4]):
+        target.arr[idx] = float(value)
+
+
+def _bounding_sphere_from_vertices(vertices):
+    points = [tuple(float(v[i]) for i in range(3)) for v in vertices if v is not None]
+    if not points:
+        return (0.0, 0.0, 0.0, 1.0), 0.0
+
+    min_x = min(point[0] for point in points)
+    min_y = min(point[1] for point in points)
+    min_z = min(point[2] for point in points)
+    max_x = max(point[0] for point in points)
+    max_y = max(point[1] for point in points)
+    max_z = max(point[2] for point in points)
+    center = (
+        (min_x + max_x) * 0.5,
+        (min_y + max_y) * 0.5,
+        (min_z + max_z) * 0.5,
+        1.0,
+    )
+    radius = 0.0
+    for px, py, pz in points:
+        dx = px - center[0]
+        dy = py - center[1]
+        dz = pz - center[2]
+        dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+        if dist > radius:
+            radius = dist
+    return center, float(radius)
+
+
+def _encode_mesh_bone_rows(mesh_bone_rows):
+    blob = bytearray()
+    for bone_index, rows in enumerate(mesh_bone_rows):
+        if not isinstance(rows, (list, tuple)) or len(rows) != 4:
+            raise ValueError(f"Mesh bone {bone_index} must have exactly 4 rows")
+        flat = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) != 4:
+                raise ValueError(f"Mesh bone {bone_index} rows must be 4-element sequences")
+            flat.extend(float(value) for value in row)
+        blob.extend(struct.pack("<16f", *flat))
+    return bytes(blob)
+
+
+def _build_reconstructed_section(buffer_bytes, section_desc, payload):
+    template_sec = section_desc["section"]
+    vbytes, ibytes, palette_bytes, nverts, nidx, export_palette = _build_section_payload(section_desc, payload)
+    sec = nglMeshSection.from_buffer_copy(bytes(template_sec))
+
+    if payload.section_name and payload.section_name != section_desc["name"]:
+        raise ValueError(
+            f"Section template {section_desc['index']} name mismatch: template '{section_desc['name']}', export '{payload.section_name}'"
+        )
+
+    palette_offset = _append_aligned(buffer_bytes, palette_bytes, 16) if palette_bytes else 0
+    vertex_offset = _append_aligned(buffer_bytes, vbytes, 16) if vbytes else 0
+    index_offset = _append_aligned(buffer_bytes, ibytes, 16) if ibytes else 0
+
+    sec.Material = int(payload.material_offset if payload.material_offset else template_sec.Material)
+    sec.BonesIdx = int(palette_offset)
+    sec.NBones = int(len(export_palette))
+    sec.NVertices = int(nverts)
+    sec.VertexBuffer.m_vertexData = int(vertex_offset)
+    sec.VertexBuffer.Size = int(len(vbytes))
+    sec.NIndices = int(nidx)
+    sec.m_indices = int(index_offset)
+    sec.field_58 = 0
+
+    center, radius = _bounding_sphere_from_vertices(payload.vertices)
+    _set_vector4d(sec.SphereCenter, center)
+    sec.SphereRadius = float(radius)
+
+    prim_type = int(sec.m_primitiveType)
+    if prim_type == 5:
+        primitive_count = max(0, nidx - 2)
+    elif prim_type == 4:
+        primitive_count = nidx // 3
+    else:
+        raise ValueError(f"Unsupported primitive type {prim_type} in section {section_desc['index']}")
+
+    return sec, primitive_count
 
 
 def write_meshfile(filepath, user_mesh, mesh_name=None):
-    with io.open(filepath, "rb") as f:
+    template_path = str(filepath)
+    with io.open(template_path, "rb") as f:
         buffer_bytes = bytearray(f.read())
 
     Header = nglMeshFileHeader.from_buffer_copy(buffer_bytes[:sizeof(nglMeshFileHeader)])
@@ -1121,67 +1581,74 @@ def write_meshfile(filepath, user_mesh, mesh_name=None):
     entry, mesh, found_name = found
     print(f"Replacing mesh '{found_name}'")
 
-    sections = _read_section_descriptors(buffer_bytes, mesh)
+    template_sections = _read_section_descriptors(buffer_bytes, mesh)
     if not isinstance(user_mesh, MeshExportData):
         raise TypeError("write_meshfile now expects MeshExportData")
-    if len(user_mesh.sections) != len(sections):
-        raise ValueError(
-            f"Section count mismatch: mesh has {len(sections)} sections but export has {len(user_mesh.sections)}"
-        )
 
+    out_path = template_path + ".mod"
+    if user_mesh.unchanged:
+        with io.open(out_path, "wb") as f:
+            f.write(buffer_bytes)
+        print(f"Successfully updated {template_path}")
+        return out_path
+
+    template_by_index = {int(section_desc["index"]): section_desc for section_desc in template_sections}
+    if not user_mesh.sections:
+        raise ValueError("Export mesh does not contain any sections")
+
+    rebuilt_section_entries = []
     mesh_data_size = 0
+    all_vertices = []
+    for payload in user_mesh.sections:
+        template_section_index = payload.template_section_index
+        if template_section_index is None:
+            raise ValueError("Every rebuilt export section must specify a template_section_index")
+        section_desc = template_by_index.get(int(template_section_index))
+        if section_desc is None:
+            raise ValueError(f"Template section {template_section_index} was not found in the source PCMESH mesh entry")
 
-    for i, section_desc in enumerate(sections):
-        payload = user_mesh.sections[i]
-        vbytes, ibytes, nverts, nidx = _build_section_payload(section_desc, payload)
+        if int(section_desc["section"].m_stride) == 64 and not user_mesh.mesh_bone_rows:
+            raise ValueError("Skinned section export requires rebuilt mesh bone-table rows")
 
-        sec_off = section_desc["offset"]
-        sec = section_desc["section"]
+        rebuilt_section, primitive_count = _build_reconstructed_section(buffer_bytes, section_desc, payload)
+        rebuilt_section_offset = _append_aligned(buffer_bytes, bytes(rebuilt_section), 16)
+        section_entry = Section()
+        section_entry.field_0 = 0
+        section_entry.Section = int(rebuilt_section_offset)
+        rebuilt_section_entries.append(section_entry)
+        mesh_data_size += int(primitive_count)
+        all_vertices.extend([vertex for vertex in payload.vertices if vertex is not None])
 
-        old_vertex_offset = int(sec.VertexBuffer.m_vertexData)
-        old_vertex_capacity = int(sec.VertexBuffer.Size)
-        vertex_offset = _write_or_append_region(
-            buffer_bytes, vbytes, old_vertex_offset, old_vertex_capacity, 16
-        )
-        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.VertexBuffer.offset + nglVertexBuffer.m_vertexData.offset, vertex_offset)
-        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.VertexBuffer.offset + nglVertexBuffer.Size.offset, len(vbytes))
-        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.NVertices.offset, nverts)
+    sections_blob = b"".join(bytes(section_entry) for section_entry in rebuilt_section_entries)
+    sections_offset = _append_aligned(buffer_bytes, sections_blob, 16) if sections_blob else 0
 
-        old_index_offset = int(sec.m_indices)
-        old_index_capacity = int(sec.NIndices) * 2
-        if nidx > 0:
-            index_offset = _write_or_append_region(
-                buffer_bytes, ibytes, old_index_offset, old_index_capacity, 16
-            )
-        else:
-            index_offset = 0
-        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.m_indices.offset, index_offset)
-        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.NIndices.offset, nidx)
-        struct.pack_into("I", buffer_bytes, sec_off + nglMeshSection.field_58.offset, 0)
+    mesh_bones_blob = _encode_mesh_bone_rows(user_mesh.mesh_bone_rows) if user_mesh.mesh_bone_rows else b""
+    mesh_bones_offset = _append_aligned(buffer_bytes, mesh_bones_blob, 16) if mesh_bones_blob else 0
 
-        prim_type = int(sec.m_primitiveType)
-        if prim_type == 5:
-            mesh_data_size += max(0, nidx - 2)
-        elif prim_type == 4:
-            mesh_data_size += nidx // 3
+    rebuilt_mesh = nglMesh.from_buffer_copy(bytes(mesh))
+    rebuilt_mesh.NSections = int(len(rebuilt_section_entries))
+    rebuilt_mesh.Sections = int(sections_offset)
+    rebuilt_mesh.NBones = int(len(user_mesh.mesh_bone_rows))
+    rebuilt_mesh.Bones = int(mesh_bones_offset)
+    rebuilt_mesh.field_3C = int(mesh_data_size)
+    mesh_center, mesh_radius = _bounding_sphere_from_vertices(all_vertices)
+    _set_vector4d(rebuilt_mesh.field_20, mesh_center)
+    rebuilt_mesh.SphereRadius = float(mesh_radius)
 
-    struct.pack_into("I", buffer_bytes, entry.field_4 + nglMesh.field_3C.offset, mesh_data_size)
+    mesh_offset = int(entry.field_4)
+    buffer_bytes[mesh_offset : mesh_offset + sizeof(nglMesh)] = bytes(rebuilt_mesh)
+    _validate_mesh_layout(buffer_bytes, rebuilt_mesh)
 
-    updated_mesh = nglMesh.from_buffer_copy(
-        buffer_bytes[entry.field_4 : entry.field_4 + sizeof(nglMesh)]
-    )
-    _validate_mesh_layout(buffer_bytes, updated_mesh)
-
-    # Keep pack-like trailing alignment for compatibility.
     buffer_size = len(buffer_bytes)
-    padding_size = (align_address(buffer_size, 0x1000)) - buffer_size
+    padding_size = align_address(buffer_size, 0x1000) - buffer_size
     if padding_size > 0:
         buffer_bytes.extend(b"\x00" * padding_size)
 
-    with io.open(filepath + ".mod", "wb") as f:
+    with io.open(out_path, "wb") as f:
         f.write(buffer_bytes)
 
-    print(f"Successfully updated {filepath}")
+    print(f"Successfully updated {template_path}")
+    return out_path
 
 def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
 
@@ -1206,8 +1673,9 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
     sections = sections_t.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(sections_t))])
 
     prev_NVertices = 0
-    mesh_data = MeshData(name=ndisplay) 
-    
+    mesh_data = MeshData(name=ndisplay)
+    mesh_data.material_catalog = [dict(entry) for entry in materials]
+
     offset = Mesh.Bones
     print(f"nBones = {Mesh.NBones}")
     for _ in range(Mesh.NBones):
@@ -1221,11 +1689,10 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
         offset = section.Section
         meshSection = nglMeshSection.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(nglMeshSection))])
         
-        print(meshSection.Material)
-        
         offset = meshSection.Name
         name = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
         section_name = name.field_4.decode("utf-8").rstrip("\x00")
+        material_entry = _resolve_section_material_entry(materials, section_name, int(meshSection.Material))
         
         if write_obj:
                 resource_file.write("o " + ndisplay + '_' + str(idx) + '\n')
@@ -1376,9 +1843,11 @@ def read_mesh(Mesh: nglMesh, buffer_bytes, materials, write_obj:bool = True):
             uvs=uvs,
             normals=normals,
             indices=indices,
-            materials=materials,
-            bones=bones_mapped
-        )        
+            bones=bones_mapped,
+            material_entry=material_entry,
+            source_section_index=idx,
+            stride=int(meshSection.m_stride),
+        )
     return mesh_data
 
 def read_meshfile(file, write_obj:bool = False):
@@ -1425,16 +1894,22 @@ def read_meshfile(file, write_obj:bool = False):
                 offset = Material.Name
                 MaterialName = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
                 print("%s" % MaterialName.field_4)
-                
+
                 offset += sizeof(tlFixedString)
                 matFlag = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
                 offset += sizeof(tlFixedString)
-                
+
                 texName = tlFixedString.from_buffer_copy(buffer_bytes[offset : (offset + sizeof(tlFixedString))])
                 texName = texName.field_4.decode("utf-8")
                 texName = f"{texName.upper()}.DDS"
                 print(f"Texture: {texName}")
-                materials.append([MaterialName.field_4, texName])
+                materials.append({
+                    "name": MaterialName.field_4.decode("utf-8", errors="ignore").rstrip("\x00"),
+                    "texture_name": texName,
+                    "offset": int(entry.field_4),
+                    "next_material_offset": int(Material.NextMaterial),
+                    "flag_name": matFlag.field_4.decode("utf-8", errors="ignore").rstrip("\x00"),
+                })
                 #assert(Material.field_44 == 1)
 
             elif type_dir_entry == int(TypeDirectoryEntry.MESH):

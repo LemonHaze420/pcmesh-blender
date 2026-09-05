@@ -70,6 +70,39 @@ def get_enum_name(enum_cls, value):
     try: return enum_cls(value).name
     except ValueError: return f"Unknown_{value}"
 
+def _normalize_generic_lookup_name(value):
+    return str(value or "").strip().casefold()
+
+_GENERIC_HELPER_NODE_NAMES = frozenset({
+    "bip01_prop_free",
+    "shake_root",
+    "fakeroot",
+    "camera_root",
+    "camera",
+})
+
+_GENERIC_VALUE_TYPE_BY_ENCODING = {
+    "nal_entropyfloat3": "nalVector3",
+    "nal_packed16entropyquaternion": "nalQuaternion",
+    "nal_entropypositionorientation": "nalPositionOrientation",
+    "nal_entropytrajectorypositionorientation": "nalPositionOrientation",
+    "nal_entropyfloat1": "float",
+    "usmevent": "unsigned char",
+}
+
+_GENERIC_RUNTIME_HANDLE_ACCESS = {
+    ("camera_root", "ae_base_bone"): ("nalPositionOrientation", "const"),
+    ("shake_root", "ae_base_bone"): ("nalPositionOrientation", "const"),
+    ("fakeroot", "ae_floor_offset"): ("float", "mutable"),
+    ("fakeroot", "nal_trajectory"): ("nalPositionOrientation", "mutable"),
+    ("fakeroot", "usmevent"): ("unsigned char", "mutable"),
+    ("camera", "maxparamfloat.fov"): ("float", "const"),
+    ("camera", "maxparamfloat.far env range"): ("float", "const"),
+    ("fakeroot", "maxparamfloat.tentacle base diameter"): ("float", "const"),
+    ("fakeroot", "maxparamfloat.subtentacle activity"): ("float", "const"),
+    ("fakeroot", "maxparamfloat.pull factor"): ("float", "const"),
+}
+
 class NalSkeletonParser:
     def __init__(self, filepath):
         self.filepath = filepath
@@ -84,8 +117,18 @@ class NalSkeletonParser:
             "default_poses": {},
             "warnings": [],
             "generic_nodes": [],
+            "generic_targets": [],
+            "generic_target_name_to_index": {},
             "generic_components": [],
             "generic_component_summary": [],
+            "generic_component_infos": [],
+            "generic_component_info_blocks": [],
+            "generic_playback_families": [],
+            "generic_handle_map": {},
+            "generic_runtime_handles": [],
+            "generic_scalar_tail": [],
+            "generic_scalar_tail_off": 0,
+            "generic_scalar_layout": [],
             "bone_map": self.bone_map,
             "parent_map": self.parent_map,
             "component_bone_names": self.component_bone_names,
@@ -285,8 +328,9 @@ class NalSkeletonParser:
         data_region_off = 0xE0
         node_record_size = 48
         component_record_size = 40
-        table_a_off = data_region_off + field_64
-        node_records_off = (table_a_off + field_6c + 3) & ~3
+        lookup_a_off = data_region_off
+        lookup_b_off = lookup_a_off + field_64
+        node_records_off = (lookup_b_off + field_6c + 3) & ~3
         component_records_off = (node_records_off + node_record_size * node_count + 3) & ~3
         file_size = os.fstat(f.fileno()).st_size
 
@@ -298,11 +342,11 @@ class NalSkeletonParser:
         })
         self.result["generic_layout"] = {
             "data_region_off": int(data_region_off),
-            "lookup_a_off": int(table_a_off),
+            "lookup_a_off": int(lookup_a_off),
+            "lookup_b_off": int(lookup_b_off),
             "node_records_off": int(node_records_off),
             "component_records_off": int(component_records_off),
         }
-
 
         nodes = []
         for node_ix in range(node_count):
@@ -326,6 +370,17 @@ class NalSkeletonParser:
             })
         self.result["generic_nodes"] = nodes
 
+        blob = Path(self.filepath).read_bytes()
+        lookup_info = self._parse_generic_lookup_a(blob, lookup_a_off, field_64)
+        lookup_summary = self._summarize_generic_lookup_a(nodes, lookup_info)
+        self.result["generic_lookup_a_counts"] = lookup_info["counts"]
+        self.result["generic_lookup_a_ops"] = lookup_info["ops"]
+        self.result["generic_lookup_a_unsupported_ops"] = lookup_info["unsupported_ops"]
+        self.result["generic_lookup_a_supported"] = bool(lookup_summary["supports_direct_local_pose"])
+        self.result["generic_lookup_b_bytes"] = blob[lookup_b_off : lookup_b_off + field_6c]
+        self.result["generic_matrix_parent_pairs"] = lookup_summary["parent_pairs"]
+        self.result["generic_matrix_target_modes"] = lookup_summary["target_modes"]
+
         generic_components = []
         for comp_ix in range(component_record_count):
             record_off = component_records_off + comp_ix * component_record_size
@@ -345,24 +400,396 @@ class NalSkeletonParser:
                 "flags": int(flags),
             })
         self.result["generic_components"] = generic_components
+        info_blocks, info_entries = self._parse_generic_component_infos(
+            component_records_off=component_records_off,
+            component_record_count=component_record_count,
+            generic_components=generic_components,
+        )
+        self.result["generic_component_info_blocks"] = info_blocks
+        self.result["generic_component_infos"] = info_entries
+        scalar_tail_off, scalar_tail, scalar_layout = self._parse_generic_scalar_tail(
+            info_blocks=info_blocks,
+            info_entries=info_entries,
+        )
+        self.result["generic_scalar_tail_off"] = int(scalar_tail_off)
+        self.result["generic_scalar_tail"] = scalar_tail
+        self.result["generic_scalar_layout"] = scalar_layout
 
-        helper_names = {"bip01_prop_free", "shake_root", "fakeroot"}
+        self._build_generic_playback_contract(
+            nodes=nodes,
+            generic_components=generic_components,
+            info_entries=info_entries,
+            scalar_layout=scalar_layout,
+        )
+
+    def _parse_generic_lookup_a(self, blob, lookup_a_off, lookup_a_size):
+        op_defs = {
+            0: ("copy_translation", 1),
+            1: ("copy_rotation", 1),
+            2: ("copy_transform", 1),
+            3: ("scale_axes", 1),
+            5: ("ik_solve", 18),
+            12: ("local_to_world", 2),
+            14: ("skip_bytes", 1),
+        }
+        end = int(lookup_a_off) + int(lookup_a_size)
+        cursor = int(lookup_a_off)
+        ops = []
+        counts = {}
+        unsupported_ops = []
+        parse_ok = True
+
+        while cursor < end:
+            op_off = int(cursor)
+            op_byte = int(blob[cursor])
+            cursor += 1
+            source = "pose" if op_byte < 0x80 else "default"
+            opcode = op_byte & 0x7F
+            op_info = op_defs.get(opcode)
+            if op_info is None:
+                parse_ok = False
+                unsupported_ops.append({
+                    "offset": int(op_off),
+                    "source": source,
+                    "opcode": int(opcode),
+                    "op_name": "unknown",
+                })
+                break
+
+            op_name, arg_len = op_info
+            if cursor + arg_len > end:
+                parse_ok = False
+                unsupported_ops.append({
+                    "offset": int(op_off),
+                    "source": source,
+                    "opcode": int(opcode),
+                    "op_name": op_name,
+                    "error": "truncated",
+                })
+                break
+
+            args = [int(v) for v in blob[cursor : cursor + arg_len]]
+            cursor += arg_len
+            counts_key = f"{source}:{op_name}"
+            counts[counts_key] = int(counts.get(counts_key, 0) + 1)
+            ops.append({
+                "offset": int(op_off),
+                "source": source,
+                "opcode": int(opcode),
+                "op_name": op_name,
+                "args": args,
+            })
+            if opcode not in (0, 1, 2, 12):
+                unsupported_ops.append({
+                    "offset": int(op_off),
+                    "source": source,
+                    "opcode": int(opcode),
+                    "op_name": op_name,
+                })
+
+        return {
+            "parse_ok": bool(parse_ok),
+            "ops": ops,
+            "counts": counts,
+            "unsupported_ops": unsupported_ops,
+        }
+
+    def _summarize_generic_lookup_a(self, nodes, lookup_info):
+        nodes_by_index = {int(node.get("node_index", -1)): node for node in nodes}
+        target_modes = {
+            int(node_ix): {
+                "target_index": int(node_ix),
+                "target_name": str(node.get("name", f"Bone_{int(node_ix)}")),
+                "translation_source": "none",
+                "translation_op": "none",
+                "rotation_source": "none",
+                "rotation_op": "none",
+            }
+            for node_ix, node in nodes_by_index.items()
+        }
+        parent_pairs = []
+        supports_direct_local_pose = bool(lookup_info.get("parse_ok", False)) and not lookup_info.get("unsupported_ops")
+
+        for op in list(lookup_info.get("ops", ())):
+            op_name = str(op.get("op_name", ""))
+            source = str(op.get("source", "pose"))
+            args = [int(v) for v in list(op.get("args", ()))]
+            if op_name == "copy_translation" and args:
+                target_ix = int(args[0])
+                target = target_modes.setdefault(
+                    target_ix,
+                    {
+                        "target_index": int(target_ix),
+                        "target_name": str(nodes_by_index.get(target_ix, {}).get("name", f"Bone_{target_ix}")),
+                        "translation_source": "none",
+                        "translation_op": "none",
+                        "rotation_source": "none",
+                        "rotation_op": "none",
+                    },
+                )
+                target["translation_source"] = source
+                target["translation_op"] = op_name
+            elif op_name == "copy_rotation" and args:
+                target_ix = int(args[0])
+                target = target_modes.setdefault(
+                    target_ix,
+                    {
+                        "target_index": int(target_ix),
+                        "target_name": str(nodes_by_index.get(target_ix, {}).get("name", f"Bone_{target_ix}")),
+                        "translation_source": "none",
+                        "translation_op": "none",
+                        "rotation_source": "none",
+                        "rotation_op": "none",
+                    },
+                )
+                target["rotation_source"] = source
+                target["rotation_op"] = op_name
+            elif op_name == "copy_transform" and args:
+                target_ix = int(args[0])
+                target = target_modes.setdefault(
+                    target_ix,
+                    {
+                        "target_index": int(target_ix),
+                        "target_name": str(nodes_by_index.get(target_ix, {}).get("name", f"Bone_{target_ix}")),
+                        "translation_source": "none",
+                        "translation_op": "none",
+                        "rotation_source": "none",
+                        "rotation_op": "none",
+                    },
+                )
+                target["translation_source"] = source
+                target["translation_op"] = op_name
+                target["rotation_source"] = source
+                target["rotation_op"] = op_name
+            elif op_name == "local_to_world" and len(args) == 2:
+                parent_pairs.append({
+                    "parent_index": int(args[0]),
+                    "child_index": int(args[1]),
+                    "parent_name": str(nodes_by_index.get(int(args[0]), {}).get("name", f"Bone_{int(args[0])}")),
+                    "child_name": str(nodes_by_index.get(int(args[1]), {}).get("name", f"Bone_{int(args[1])}")),
+                })
+
+        return {
+            "supports_direct_local_pose": bool(supports_direct_local_pose),
+            "parent_pairs": parent_pairs,
+            "target_modes": [target_modes[idx] for idx in sorted(target_modes)],
+        }
+    
+    def _parse_generic_component_infos(self, component_records_off, component_record_count, generic_components):
+        blob = Path(self.filepath).read_bytes()
+        file_size = len(blob)
+        scan_off = (component_records_off + component_record_count * 40 + 3) & ~3
+
+        known_encodings = {
+            0x6359B214: ("nal_entropyfloat3", 12, "<3f"),
+            0xD4D958C0: ("nal_packed16entropyquaternion", 16, "<4f"),
+            0xAD61B94C: ("nal_entropypositionorientation", 28, "<7f"),
+            0x07FFCAF3: ("nal_entropytrajectorypositionorientation", 28, "<7f"),
+            0x6359B212: ("nal_entropyfloat1", 4, "<f"),
+            0x9427FDF7: ("usmevent", 4, "<I"),
+        }
+
+        def parse_record(off):
+            if off < 0 or off + 48 > file_size:
+                return None
+            name_hash = struct.unpack_from("<I", blob, off)[0]
+            info = known_encodings.get(int(name_hash))
+            if info is None:
+                return None
+            raw_name = blob[off + 4 : off + 32].split(b"\x00", 1)[0].decode("latin-1", errors="ignore")
+            unk0, comp_base, comp_count, data_offset = struct.unpack_from("<IIII", blob, off + 32)
+            if unk0 != 0 or comp_count <= 0:
+                return None
+            if comp_base + comp_count > component_record_count:
+                return None
+            return {
+                "off": int(off),
+                "name_hash": int(name_hash),
+                "encoding_name": info[0],
+                "raw_name": raw_name,
+                "unk0": int(unk0),
+                "component_index_base": int(comp_base),
+                "component_count": int(comp_count),
+                "data_offset": int(data_offset),
+                "elem_size": int(info[1]),
+                "fmt": info[2],
+            }
+
+        records = []
+        off = scan_off
+        while off + 48 <= file_size:
+            rec = parse_record(off)
+            if rec is None:
+                off += 4
+                continue
+            records.append(rec)
+            off += 48
+
+        if not records:
+            return [], []
+
+        blocks = []
+        current = [records[0]]
+        for rec in records[1:]:
+            if rec["off"] == current[-1]["off"] + 48:
+                current.append(rec)
+                continue
+            blocks.append(current)
+            current = [rec]
+        blocks.append(current)
+
+        out_blocks = []
+        out_infos = []
+        for block in blocks:
+            block_start = int(block[0]["off"])
+            block_data_base = block_start + 48 * len(block)
+            block_out = {
+                "info_off": block_start,
+                "data_base_off": int(block_data_base),
+                "count": int(len(block)),
+                "encodings": [],
+            }
+            for rec in block:
+                data_off = block_data_base + int(rec["data_offset"])
+                target_slice = generic_components[rec["component_index_base"] : rec["component_index_base"] + rec["component_count"]]
+                values = []
+                elem_size = int(rec["elem_size"])
+                fmt = rec["fmt"]
+                for idx in range(int(rec["component_count"])):
+                    entry_off = data_off + idx * elem_size
+                    if entry_off < 0 or entry_off + elem_size > file_size:
+                        break
+                    raw_vals = struct.unpack_from(fmt, blob, entry_off)
+                    if len(raw_vals) == 1:
+                        values.append(float(raw_vals[0]) if fmt == "<f" else int(raw_vals[0]))
+                    else:
+                        values.append(tuple(float(v) for v in raw_vals))
+                info_out = {
+                    "info_off": int(rec["off"]),
+                    "data_off": int(data_off),
+                    "encoding_name": rec["encoding_name"],
+                    "raw_name": rec["raw_name"],
+                    "name_hash": int(rec["name_hash"]),
+                    "component_index_base": int(rec["component_index_base"]),
+                    "component_count": int(rec["component_count"]),
+                    "data_offset": int(rec["data_offset"]),
+                    "elem_size": int(elem_size),
+                    "target_indices": [int(comp.get("target_index", -1)) for comp in target_slice],
+                    "component_indices": [int(comp.get("component_index", -1)) for comp in target_slice],
+                    "default_values": values,
+                }
+                block_out["encodings"].append(info_out)
+                out_infos.append(info_out)
+            out_blocks.append(block_out)
+
+        return out_blocks, out_infos
+
+
+    def _parse_generic_scalar_tail(self, info_blocks, info_entries):
+        blob = Path(self.filepath).read_bytes()
+        file_size = len(blob)
+        if not info_blocks:
+            return 0, [], []
+
+        tail_start = 0
+        for block in info_blocks:
+            for info in block.get("encodings", []):
+                data_off = int(info.get("data_off", 0))
+                elem_size = int(info.get("elem_size", 0))
+                comp_count = int(info.get("component_count", 0))
+                tail_start = max(tail_start, data_off + elem_size * comp_count)
+
+        if tail_start <= 0 or tail_start >= file_size:
+            return 0, [], []
+
+        tail_bytes = blob[tail_start:]
+        scalar_count = len(tail_bytes) // 4
+        scalar_tail = [
+            float(v)
+            for v in struct.unpack_from(f"<{scalar_count}f", tail_bytes, 0)
+        ]
+
+        layout = []
+        cursor = 0
+        for info in info_entries:
+            enc_name = str(info.get("encoding_name", ""))
+            comp_count = int(info.get("component_count", 0))
+            if enc_name in ("nal_entropypositionorientation", "nal_entropytrajectorypositionorientation"):
+                scalar_width = 2
+            elif enc_name in ("nal_entropyfloat3", "nal_packed16entropyquaternion", "nal_entropyfloat1"):
+                scalar_width = 1
+            else:
+                continue
+            total = comp_count * scalar_width
+            layout.append({
+                "encoding_name": enc_name,
+                "component_index_base": int(info.get("component_index_base", 0)),
+                "component_count": comp_count,
+                "scalar_width": scalar_width,
+                "scalar_start": int(cursor),
+                "scalar_end": int(cursor + total),
+                "values": scalar_tail[cursor : cursor + total],
+            })
+            cursor += total
+
+        return int(tail_start), scalar_tail, layout
+
+
+    def _make_generic_handle_key(self, target_name, component_name):
+        target_key = _normalize_generic_lookup_name(target_name)
+        component_key = _normalize_generic_lookup_name(component_name)
+        if not target_key or not component_key:
+            return ""
+        return f"{target_key}::{component_key}"
+
+    def _infer_generic_handle_contract(self, target_name, component_name, encoding_name):
+        handle_info = _GENERIC_RUNTIME_HANDLE_ACCESS.get(
+            (_normalize_generic_lookup_name(target_name), _normalize_generic_lookup_name(component_name))
+        )
+        value_type = _GENERIC_VALUE_TYPE_BY_ENCODING.get(str(encoding_name), "unknown")
+        if handle_info is None:
+            return value_type, "unknown"
+        return str(handle_info[0]), str(handle_info[1])
+
+    def _build_generic_playback_contract(self, nodes, generic_components, info_entries, scalar_layout):
+        target_records = []
+        target_by_index = {}
+        target_name_to_index = {}
+        known_node_ids = set()
+
         for node in nodes:
             node_ix = int(node.get("node_index", -1))
             name = str(node.get("name", "")).strip()
-            if not name:
+            if node_ix < 0 or not name:
                 continue
-            if name in helper_names:
-                self.component_bone_names[node_ix] = name
-                continue
-            self.bone_map[node_ix] = name
 
-        for node in nodes:
-            node_ix = int(node.get("node_index", -1))
-            if node_ix not in self.bone_map:
-                continue
-            parent_index = int(node.get("parent_index", -1))
-            self.parent_map[node_ix] = parent_index if parent_index in self.bone_map else -1
+            is_helper = name in _GENERIC_HELPER_NODE_NAMES
+            target_record = {
+                "node_index": int(node_ix),
+                "name": name,
+                "name_key": _normalize_generic_lookup_name(name),
+                "parent_index": int(node.get("parent_index", -1)),
+                "node_kind": int(node.get("kind", 0)),
+                "pose_offset": int(node.get("pose_offset", 0)),
+                "data_offset": int(node.get("data_offset", 0)),
+                "is_helper": bool(is_helper),
+                "target_kind": "helper" if is_helper else "bind",
+                "imports_to_blender": True,
+            }
+            target_records.append(target_record)
+            target_by_index[node_ix] = target_record
+            if target_record["name_key"] and target_record["name_key"] not in target_name_to_index:
+                target_name_to_index[target_record["name_key"]] = int(node_ix)
+            if is_helper:
+                self.component_bone_names[node_ix] = name
+            else:
+                self.bone_map[node_ix] = name
+            known_node_ids.add(node_ix)
+
+        for target_record in target_records:
+            node_ix = int(target_record.get("node_index", -1))
+            parent_index = int(target_record.get("parent_index", -1))
+            self.parent_map[node_ix] = parent_index if parent_index in known_node_ids else -1
 
         summary = {}
         summary_order = []
@@ -373,16 +800,125 @@ class NalSkeletonParser:
                     "name": name,
                     "count": 0,
                     "target_indices": [],
+                    "target_names": [],
                 }
                 summary_order.append(name)
             entry = summary[name]
+            target_ix = int(comp.get("target_index", -1))
+            target_name = str(target_by_index.get(target_ix, {}).get("name", f"Bone_{target_ix}"))
             entry["count"] += 1
-            entry["target_indices"].append(int(comp.get("target_index", -1)))
+            entry["target_indices"].append(target_ix)
+            entry["target_names"].append(target_name)
         self.result["generic_component_summary"] = [summary[name] for name in summary_order]
 
-        self.result["warnings"].append(
-            "WIP"
-        )
+        scalar_by_base = {
+            int(entry.get("component_index_base", -1)): entry
+            for entry in scalar_layout
+        }
+        matrix_mode_by_target = {
+            int(entry.get("target_index", -1)): entry
+            for entry in self.result.get("generic_matrix_target_modes", [])
+        }
+
+        family_records = []
+        handle_map = {}
+        runtime_handles = []
+        for info in info_entries:
+            encoding_name = str(info.get("encoding_name", "Unknown"))
+            comp_base = int(info.get("component_index_base", 0))
+            comp_count = int(info.get("component_count", 0))
+            scalar_entry = scalar_by_base.get(comp_base)
+            scalar_width = int((scalar_entry or {}).get("scalar_width", 0) or 0)
+            scalar_values = list((scalar_entry or {}).get("values", []))
+            default_values = list(info.get("default_values", []))
+            target_indices = [int(v) for v in info.get("target_indices", [])]
+            component_indices = [int(v) for v in info.get("component_indices", [])]
+            family_entries = []
+
+            for local_ix in range(comp_count):
+                component_ix = int(component_indices[local_ix]) if local_ix < len(component_indices) else int(comp_base + local_ix)
+                target_ix = int(target_indices[local_ix]) if local_ix < len(target_indices) else -1
+                component = generic_components[component_ix] if 0 <= component_ix < len(generic_components) else {}
+                target_record = target_by_index.get(target_ix, {})
+                target_name = str(target_record.get("name", f"Bone_{target_ix}"))
+                component_name = str(component.get("name", "")).strip()
+                handle_key = self._make_generic_handle_key(target_name, component_name)
+                value_type, handle_access = self._infer_generic_handle_contract(
+                    target_name,
+                    component_name,
+                    encoding_name,
+                )
+
+                component_scalar_values = []
+                if scalar_width > 0:
+                    scalar_start = local_ix * scalar_width
+                    scalar_end = scalar_start + scalar_width
+                    component_scalar_values = list(scalar_values[scalar_start:scalar_end])
+
+                target_matrix_mode = matrix_mode_by_target.get(int(target_ix), {})
+                component_entry = {
+                    "component_index": int(component_ix),
+                    "component_name": component_name,
+                    "component_key": _normalize_generic_lookup_name(component_name),
+                    "component_flags": int(component.get("flags", 0)),
+                    "target_index": int(target_ix),
+                    "target_name": target_name,
+                    "target_key": _normalize_generic_lookup_name(target_name),
+                    "target_is_helper": bool(target_record.get("is_helper", False)),
+                    "target_kind": str(target_record.get("target_kind", "unknown")),
+                    "parent_index": int(target_record.get("parent_index", -1)),
+                    "encoding_name": encoding_name,
+                    "value_type": value_type,
+                    "handle_access": handle_access,
+                    "default_value": default_values[local_ix] if local_ix < len(default_values) else None,
+                    "scalar_values": component_scalar_values,
+                    "handle_key": handle_key,
+                    "matrix_translation_source": str(target_matrix_mode.get("translation_source", "unknown")),
+                    "matrix_translation_op": str(target_matrix_mode.get("translation_op", "unknown")),
+                    "matrix_rotation_source": str(target_matrix_mode.get("rotation_source", "unknown")),
+                    "matrix_rotation_op": str(target_matrix_mode.get("rotation_op", "unknown")),
+                }
+                family_entries.append(component_entry)
+
+                if handle_key and handle_key not in handle_map:
+                    handle_record = {
+                        "target_index": int(target_ix),
+                        "target_name": target_name,
+                        "target_is_helper": bool(target_record.get("is_helper", False)),
+                        "target_kind": str(target_record.get("target_kind", "unknown")),
+                        "parent_index": int(target_record.get("parent_index", -1)),
+                        "component_index": int(component_ix),
+                        "component_name": component_name,
+                        "component_flags": int(component.get("flags", 0)),
+                        "encoding_name": encoding_name,
+                        "value_type": value_type,
+                        "handle_access": handle_access,
+                        "default_value": component_entry["default_value"],
+                        "scalar_values": component_scalar_values,
+                        "matrix_translation_source": component_entry["matrix_translation_source"],
+                        "matrix_translation_op": component_entry["matrix_translation_op"],
+                        "matrix_rotation_source": component_entry["matrix_rotation_source"],
+                        "matrix_rotation_op": component_entry["matrix_rotation_op"],
+                    }
+                    handle_map[handle_key] = handle_record
+                    if handle_access != "unknown":
+                        runtime_handles.append(handle_record)
+
+            family_records.append({
+                "encoding_name": encoding_name,
+                "component_index_base": int(comp_base),
+                "component_count": int(comp_count),
+                "info_off": int(info.get("info_off", 0)),
+                "data_off": int(info.get("data_off", 0)),
+                "value_type": _GENERIC_VALUE_TYPE_BY_ENCODING.get(encoding_name, "unknown"),
+                "entries": family_entries,
+            })
+
+        self.result["generic_targets"] = target_records
+        self.result["generic_target_name_to_index"] = target_name_to_index
+        self.result["generic_playback_families"] = family_records
+        self.result["generic_handle_map"] = handle_map
+        self.result["generic_runtime_handles"] = runtime_handles
 
 
     def _get_pose_index_for_comp_index(self, component_meta, comp_index):

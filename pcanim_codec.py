@@ -1,5 +1,17 @@
 import math
 
+try:
+    from .pcanim_transforms import (
+        _engine_to_blender_quat_wxyz,
+        _quat_mul_wxyz,
+        _quat_normalize_wxyz,
+    )
+except Exception:
+    from pcanim_transforms import (  # type: ignore
+        _engine_to_blender_quat_wxyz,
+        _quat_mul_wxyz,
+        _quat_normalize_wxyz,
+    )
 # iComponentID
 COMP_ARBITRARY_PO = 0
 COMP_GENERIC = 1
@@ -19,6 +31,823 @@ COMP_FING5 = 13
 FLAG_SCENE_ANIM = 0x00020000
 HAS_TRACK_DATA = 0x1
 HAS_PER_ANIM_DATA = 0x2
+
+GENERIC_TRAJECTORY_FIXED_SCALE = 0.001
+
+def _walk_generic_entropy_float3_control(blob, offset, active_count):
+    cursor = int(offset)
+    entries = []
+    for _ in range(max(0, int(active_count))):
+        len_x = int(blob[cursor])
+        x_data_off = cursor + 1
+        cursor = x_data_off + len_x
+        len_y = int(blob[cursor])
+        y_data_off = cursor + 1
+        cursor = y_data_off + len_y
+        len_z = int(blob[cursor])
+        z_data_off = cursor + 1
+        cursor = z_data_off + len_z
+        entries.append({
+            "len_x": len_x,
+            "len_y": len_y,
+            "len_z": len_z,
+            "x_data_off": int(x_data_off),
+            "y_data_off": int(y_data_off),
+            "z_data_off": int(z_data_off),
+        })
+    return cursor, entries
+
+
+def _walk_generic_packed16_quat_control(blob, offset, active_count):
+    cursor = int(offset)
+    entries = []
+    for _ in range(max(0, int(active_count))):
+        data_len = int(blob[cursor])
+        data_off = cursor + 1
+        cursor = data_off + data_len
+        entries.append({
+            "len": data_len,
+            "data_off": int(data_off),
+        })
+    return cursor, entries
+
+
+
+def _walk_generic_position_orientation_control(blob, offset, active_count):
+    cursor = int(offset)
+    entries = []
+    for _ in range(max(0, int(active_count))):
+        len_x = int(blob[cursor])
+        x_data_off = cursor + 1
+        cursor = x_data_off + len_x
+        len_y = int(blob[cursor])
+        y_data_off = cursor + 1
+        cursor = y_data_off + len_y
+        len_z = int(blob[cursor])
+        z_data_off = cursor + 1
+        cursor = z_data_off + len_z
+        quat_len = int(blob[cursor])
+        quat_data_off = cursor + 1
+        cursor = quat_data_off + quat_len
+        entries.append({
+            "len_x": len_x,
+            "len_y": len_y,
+            "len_z": len_z,
+            "len_q": quat_len,
+            "x_data_off": int(x_data_off),
+            "y_data_off": int(y_data_off),
+            "z_data_off": int(z_data_off),
+            "q_data_off": int(quat_data_off),
+        })
+    return cursor, entries
+
+
+def _generic_playback_families(skel_data, encodings=None):
+    families = list((skel_data or {}).get("generic_playback_families", ()))
+    if encodings is None:
+        return families
+    wanted = {str(name) for name in encodings}
+    return [
+        family
+        for family in families
+        if str(family.get("encoding_name", "")) in wanted
+    ]
+
+def _generic_active_entries(family, active_components):
+    return [
+        entry
+        for entry in list((family or {}).get("entries", ()))
+        if int(entry.get("component_index", -1)) in active_components
+    ]
+
+def _inspect_generic_body_control(blob, anim, skel_data):
+    common_off = int(anim.get("generic_common_header_off", 0))
+    if common_off <= 0 or common_off + 56 > len(blob):
+        return {}
+
+    active_components = set(int(v) for v in anim.get("generic_active_component_indices", []))
+    families = sorted(
+        _generic_playback_families(
+            skel_data,
+            ("nal_entropyfloat3", "nal_packed16entropyquaternion"),
+        ),
+        key=lambda family: int(family.get("component_index_base", 0)),
+    )
+    if not families:
+        return {}
+
+    cursor = common_off + 56
+    blocks = []
+    scalar_cursor = 0
+    try:
+        for family in families:
+            active_entries = _generic_active_entries(family, active_components)
+            encoding_name = str(family.get("encoding_name", "Unknown"))
+            block = {
+                "encoding_name": encoding_name,
+                "component_index_base": int(family.get("component_index_base", 0)),
+                "component_count": int(family.get("component_count", 0)),
+                "active_component_indices": [int(entry.get("component_index", -1)) for entry in active_entries],
+                "active_component_count": int(len(active_entries)),
+                "control_start_off": int(cursor),
+                "scalar_tail_start": int(scalar_cursor),
+            }
+            if encoding_name == "nal_entropyfloat3":
+                cursor, entries = _walk_generic_entropy_float3_control(blob, cursor, len(active_entries))
+                block["control_entries"] = entries
+            else:
+                cursor, entries = _walk_generic_packed16_quat_control(blob, cursor, len(active_entries))
+                block["control_entries"] = entries
+            scalar_cursor += int(family.get("component_count", 0))
+            block["scalar_tail_end"] = int(scalar_cursor)
+            block["control_end_off"] = int(cursor)
+            blocks.append(block)
+    except Exception as exc:
+        return {
+            "generic_body_control_start_off": int(common_off + 56),
+            "generic_body_control_error": str(exc),
+            "generic_body_control_blocks": blocks,
+        }
+
+    return {
+        "generic_body_control_start_off": int(common_off + 56),
+        "generic_body_control_end_off": int(cursor),
+        "generic_body_control_blocks": blocks,
+    }
+
+
+GENERIC_ENTROPY_MAGNITUDE_BIT_WIDTH = (3, 5, 8, 21)
+
+
+class _GenericScalarState:
+    __slots__ = ("stream", "codec", "runlen", "whole_int", "delta_int")
+
+    def __init__(self, data):
+        self.stream = _BitStream(data)
+        self.codec = -1
+        self.runlen = 0
+        self.whole_int = 0
+        self.delta_int = 0
+
+
+def _generic_read_s32(stream):
+    raw = stream.read_bits(32)
+    if raw & 0x80000000:
+        raw -= 0x100000000
+    return int(raw)
+
+
+def _generic_read_i16_bias(stream):
+    return int(stream.read_bits(16)) - 0x8000
+
+
+def _generic_decode_small_delta(code):
+    if (code & 0x1F) != 0:
+        if code & 1:
+            shift = ((code >> 1) & 0xF) + 1
+            group = (code >> 5) & 0x7
+            if (group & 0x4) == 0:
+                group -= 7
+            return int(group << shift)
+        return int(((code >> 1) & 0xF) - 8)
+    shift = ((code >> 5) & 0xF) + 17
+    group = code >> 9
+    if (group & 0x4) == 0:
+        group -= 7
+    return int(group << shift)
+
+
+def _generic_expand_entropy_runs(state, sample_count):
+    out = []
+    remaining = int(sample_count)
+    while remaining > 0:
+        if state.runlen > 0:
+            zeros = min(remaining, int(state.runlen))
+            out.extend([0] * zeros)
+            state.runlen -= zeros
+            remaining -= zeros
+            continue
+
+        decoder_fn = DECODER_TABLE.get(int(state.codec) & 0x3F)
+        if decoder_fn is None:
+            raise PCANIMCodecError(f"Unsupported Generic entropy decoder index {int(state.codec) & 0x3F}")
+        runlen, decoded = decoder_fn(state.stream)
+        out.append(int(decoded))
+        remaining -= 1
+        zero_fill = min(remaining, max(0, int(runlen) - 1))
+        if zero_fill > 0:
+            out.extend([0] * zero_fill)
+            remaining -= zero_fill
+        state.runlen = max(0, int(runlen) - 1 - zero_fill)
+    return out
+
+
+def _decode_generic_entropy_scalar_stream(data, sample_count, scale):
+    sample_count = int(sample_count)
+    if sample_count <= 0:
+        return []
+
+    state = _GenericScalarState(data)
+    signed_scale = float(scale) < 0.0
+    scale_abs = abs(float(scale))
+    codec = int(state.stream.read_bits(5))
+    if signed_scale:
+        codec += 0x20
+    state.codec = codec
+
+    if state.stream.read_bits(1):
+        whole_int = _generic_read_s32(state.stream)
+    else:
+        whole_int = _generic_read_i16_bias(state.stream)
+    state.whole_int = int(whole_int)
+
+    if state.codec & 0x20:
+        if state.stream.read_bits(1):
+            delta_int = _generic_read_s32(state.stream)
+        else:
+            delta_int = _generic_read_i16_bias(state.stream)
+    else:
+        delta_int = _generic_decode_small_delta(int(state.stream.read_bits(12)))
+    state.delta_int = int(delta_int)
+
+    # Decomp seeds the predictor with the first absolute sample and the second
+    # absolute sample (`whole + delta`), not the raw delta residual itself.
+    second_int = int(state.whole_int) + int(state.delta_int)
+    out = [float(state.whole_int) * scale_abs]
+    if sample_count == 1:
+        return out
+    out.append(float(second_int) * scale_abs)
+    if sample_count == 2:
+        return out
+
+    encoded = _generic_expand_entropy_runs(state, sample_count - 2)
+    prev2 = int(state.whole_int)
+    prev1 = int(second_int)
+    for raw in encoded:
+        curr = int(raw) + 2 * prev1 - prev2
+        out.append(float(curr) * scale_abs)
+        prev2, prev1 = prev1, curr
+    return out
+
+
+class _GenericQuatChannelState:
+    __slots__ = ("bitpos", "codec", "runlen")
+
+    def __init__(self, bitpos=0, codec=-1, runlen=0):
+        self.bitpos = int(bitpos)
+        self.codec = int(codec)
+        self.runlen = int(runlen)
+
+    def clone(self):
+        return _GenericQuatChannelState(self.bitpos, self.codec, self.runlen)
+
+
+def _generic_decode_quat_signed_lsb(raw):
+    value = int(raw)
+    return -(value >> 1) if (value & 1) else (value >> 1)
+
+
+def _generic_decode_packed_quat_small_delta(code):
+    value = int(code)
+    if (value & 0x1F) != 0:
+        if value & 1:
+            shift = ((value >> 1) & 0x7) + 1
+            group = (value >> 4) & 0x7
+            if (group & 0x4) == 0:
+                group -= 7
+            return int(group << shift)
+        return int(((value >> 1) & 0xF) - 8)
+    shift = ((value >> 5) & 0xF) + 9
+    group = value >> 9
+    if (group & 0x4) == 0:
+        group -= 7
+    return int(group << shift)
+
+
+def _generic_decode_packed_quat_next_channel(data, channel, sample_count):
+    next_channel = channel.clone()
+    next_channel.runlen = 0
+    if int(sample_count) > 2:
+        stream = _BitStream(data)
+        stream.bitpos = int(next_channel.bitpos)
+        temp_state = _GenericScalarState(b"")
+        temp_state.stream = stream
+        temp_state.codec = int(next_channel.codec)
+        temp_state.runlen = 0
+        _generic_expand_entropy_runs(temp_state, int(sample_count) - 2)
+        next_channel.bitpos = int(temp_state.stream.bitpos)
+        next_channel.runlen = int(temp_state.runlen)
+    return next_channel
+
+
+def _decode_generic_packed16_quat_state(data, sample_count, scale):
+    sample_count = int(sample_count)
+    if sample_count <= 0:
+        return None
+
+    scale_abs = abs(float(scale))
+    signed_scale = float(scale) < 0.0
+    states = [_GenericQuatChannelState(), _GenericQuatChannelState(), _GenericQuatChannelState()]
+    seed_components = []
+    delta_components = []
+
+    for comp_ix in range(3):
+        channel = states[comp_ix]
+        stream = _BitStream(data)
+        stream.bitpos = int(channel.bitpos)
+
+        next_channel_skip = 0
+        if comp_ix < 2:
+            if stream.read_bits(1):
+                next_channel_skip = int(stream.read_bits(11)) + 256
+
+        codec = int(stream.read_bits(5))
+        if signed_scale:
+            codec += 0x20
+        channel.codec = codec
+
+        magnitude_ix = int(stream.read_bits(2))
+        magnitude_bits = int(GENERIC_ENTROPY_MAGNITUDE_BIT_WIDTH[magnitude_ix])
+        seed_int = _generic_decode_quat_signed_lsb(stream.read_bits(magnitude_bits))
+        seed_components.append(float(seed_int) * scale_abs * 0.25)
+
+        if signed_scale:
+            delta_mag_ix = int(stream.read_bits(2))
+            delta_mag_bits = int(GENERIC_ENTROPY_MAGNITUDE_BIT_WIDTH[delta_mag_ix])
+            delta_int = _generic_decode_quat_signed_lsb(stream.read_bits(delta_mag_bits))
+        else:
+            delta_int = _generic_decode_packed_quat_small_delta(stream.read_bits(12))
+        delta_components.append(int(delta_int))
+
+        channel.bitpos = int(stream.bitpos)
+        channel.runlen = 0
+
+        if comp_ix >= 2:
+            continue
+
+        if next_channel_skip > 0:
+            next_channel = _GenericQuatChannelState(
+                bitpos=int(stream.bitpos) + int(next_channel_skip),
+                codec=-1,
+                runlen=0,
+            )
+        else:
+            next_channel = _generic_decode_packed_quat_next_channel(data, channel, sample_count)
+            next_channel.codec = -1
+            next_channel.runlen = 0
+        states[comp_ix + 1] = next_channel
+
+    seed_x, seed_y, seed_z = seed_components
+    seed_w = math.sqrt(abs(1.0 - (seed_x * seed_x + seed_y * seed_y + seed_z * seed_z)))
+    seed_quat = _quat_normalize_wxyz((seed_w, seed_x, seed_y, seed_z))
+
+    return {
+        "quat": seed_quat,
+        "channels": states,
+        "delta_components": delta_components,
+        "scale_abs": scale_abs,
+        "flags": 0x80,
+    }
+
+
+def _decode_generic_packed16_quat_stream(data, sample_count, scale):
+    sample_count = int(sample_count)
+    if sample_count <= 0:
+        return []
+
+    state = _decode_generic_packed16_quat_state(data, sample_count, scale)
+    if state is None:
+        return []
+
+    current_quat = state["quat"]
+    channels = state["channels"]
+    delta_components = [int(v) for v in state["delta_components"]]
+    scale_abs = float(state["scale_abs"])
+    flags = int(state["flags"])
+    out = []
+    remaining = sample_count
+
+    while remaining > 0 and (flags & 0xC0):
+        if flags & 0x40:
+            dx, dy, dz = (float(delta_components[0]) * scale_abs, float(delta_components[1]) * scale_abs, float(delta_components[2]) * scale_abs)
+            dw = math.sqrt(abs(1.0 - (dx * dx + dy * dy + dz * dz)))
+            delta_quat = _quat_normalize_wxyz((dw, dx, dy, dz))
+            current_quat = _quat_normalize_wxyz(_quat_mul_wxyz(delta_quat, current_quat))
+        out.append(current_quat)
+        remaining -= 1
+        flags = (int(channels[0].codec) & 0x3F) | max(0, flags - 0x40)
+
+    if remaining <= 0:
+        return out
+
+    streams = []
+    for channel in channels:
+        stream = _BitStream(data)
+        stream.bitpos = int(channel.bitpos)
+        temp_state = _GenericScalarState(b"")
+        temp_state.stream = stream
+        temp_state.codec = int(channel.codec)
+        temp_state.runlen = int(channel.runlen)
+        streams.append(_generic_expand_entropy_runs(temp_state, remaining))
+
+    x_accum, y_accum, z_accum = delta_components
+    for idx in range(remaining):
+        x_accum += int(streams[0][idx])
+        y_accum += int(streams[1][idx])
+        z_accum += int(streams[2][idx])
+        dx = float(x_accum) * scale_abs
+        dy = float(y_accum) * scale_abs
+        dz = float(z_accum) * scale_abs
+        dw = math.sqrt(abs(1.0 - (dx * dx + dy * dy + dz * dz)))
+        delta_quat = _quat_normalize_wxyz((dw, dx, dy, dz))
+        current_quat = _quat_normalize_wxyz(_quat_mul_wxyz(delta_quat, current_quat))
+        out.append(current_quat)
+
+    return out
+
+
+def _decode_generic_tracks(anim, skel_data, blob):
+    body_blocks = list(anim.get("generic_body_control_blocks", []))
+    if not body_blocks:
+        return {}, ["generic_body_control_missing"], "", {}
+
+    playback_families = _generic_playback_families(
+        skel_data,
+        (
+            "nal_entropyfloat3",
+            "nal_packed16entropyquaternion",
+            "nal_entropypositionorientation",
+            "nal_entropytrajectorypositionorientation",
+            "nal_entropyfloat1",
+            "usmevent",
+        ),
+    )
+    family_by_base = {
+        int(family.get("component_index_base", -1)): family
+        for family in playback_families
+    }
+    active_components = set(int(v) for v in anim.get("generic_active_component_indices", []))
+    frame_count = int(anim.get("frame_count", 0))
+    shared_scales = list(anim.get("generic_shared_scalar_floats", []))
+    shared_scale_ix = 0
+    bone_tracks = {}
+    warnings = []
+    partial_note = "generic_body_rotation_only"
+
+    generic_active_families = {
+        str(family.get("encoding_name", "Unknown"))
+        for family in playback_families
+        if _generic_active_entries(family, active_components)
+    }
+
+    decoded_families = set()
+    applied_families = set()
+    metadata_only_families = set()
+    helper_targets = set()
+    floor_offset_tracks = []
+    usmevent_tracks = []
+    base_bone_po_applied = False
+    helper_root_applied = False
+    generic_lookup_a_supported = bool((skel_data or {}).get("generic_lookup_a_supported", False))
+    float3_applied = False
+    float3_applied_targets = set()
+    float3_skipped_targets = set()
+    if not generic_lookup_a_supported and "nal_entropyfloat3" in generic_active_families:
+        warnings.append("generic_float3_matrix_program_unsupported")
+
+    def _record_named_target(collection, entry):
+        target_name = str(entry.get("target_name", "")).strip()
+        if target_name:
+            collection.add(target_name)
+
+    def _record_helper_target(entry):
+        if not bool(entry.get("target_is_helper", False)):
+            return
+        _record_named_target(helper_targets, entry)
+    def _apply_po_track(entry, control, pos_scale, quat_scale, warning_prefix):
+        comp_ix = int(entry.get("component_index", -1))
+        target_ix = int(entry.get("target_index", -1))
+        default_value = list(entry.get("default_value") or [])
+        if len(default_value) < 7:
+            warnings.append(f"{warning_prefix}_default_oob:{comp_ix}:{len(default_value)}")
+            return False
+
+        x_data_off = int(control.get("x_data_off", 0))
+        y_data_off = int(control.get("y_data_off", 0))
+        z_data_off = int(control.get("z_data_off", 0))
+        q_data_off = int(control.get("q_data_off", 0))
+
+        x_data = blob[x_data_off : x_data_off + int(control.get("len_x", 0))]
+        y_data = blob[y_data_off : y_data_off + int(control.get("len_y", 0))]
+        z_data = blob[z_data_off : z_data_off + int(control.get("len_z", 0))]
+        q_data = blob[q_data_off : q_data_off + int(control.get("len_q", 0))]
+
+        try:
+            xs = _decode_generic_entropy_scalar_stream(x_data, frame_count, pos_scale)
+            ys = _decode_generic_entropy_scalar_stream(y_data, frame_count, pos_scale)
+            zs = _decode_generic_entropy_scalar_stream(z_data, frame_count, pos_scale)
+            decoded_quats = _decode_generic_packed16_quat_stream(q_data, frame_count, quat_scale)
+        except Exception as exc:
+            warnings.append(f"{warning_prefix}_decode_failed:{comp_ix}:{exc}")
+            return False
+
+        if len(decoded_quats) != frame_count:
+            warnings.append(f"{warning_prefix}_quat_length_mismatch:{comp_ix}:{len(decoded_quats)}")
+            return False
+
+        default_quat_xyzw = tuple(float(v) for v in default_value[:4])
+        default_quat = _quat_normalize_wxyz((
+            default_quat_xyzw[3],
+            default_quat_xyzw[0],
+            default_quat_xyzw[1],
+            default_quat_xyzw[2],
+        ))
+        default_pos = tuple(float(v) for v in default_value[4:7])
+
+        track = bone_tracks.setdefault(int(target_ix), {"rotation": {}, "location": {}})
+        rot_track = track.setdefault("rotation", {})
+        loc_track = track.setdefault("location", {})
+        for frame_no, decoded_quat in enumerate(decoded_quats, start=1):
+            final_quat = _quat_mul_wxyz(decoded_quat, default_quat)
+            rot_track[int(frame_no)] = _engine_to_blender_quat_wxyz(final_quat)
+            loc_track[int(frame_no)] = (
+                float(default_pos[0] + xs[frame_no - 1]),
+                float(default_pos[1] + ys[frame_no - 1]),
+                float(default_pos[2] + zs[frame_no - 1]),
+            )
+        return True
+
+    for block in body_blocks:
+        encoding_name = str(block.get("encoding_name", ""))
+        if encoding_name not in ("nal_entropyfloat3", "nal_packed16entropyquaternion"):
+            continue
+
+        comp_base = int(block.get("component_index_base", -1))
+        family = family_by_base.get(comp_base)
+        if family is None:
+            warnings.append(f"generic_block_missing_metadata:{encoding_name}:{comp_base}")
+            continue
+
+        block_shared_scale = 1.0
+        if shared_scale_ix < len(shared_scales):
+            block_shared_scale = float(shared_scales[shared_scale_ix])
+        shared_scale_ix += 1
+
+
+        entry_by_component = {
+            int(entry.get("component_index", -1)): entry
+            for entry in list(family.get("entries", []))
+        }
+        active_ids = [int(v) for v in block.get("active_component_indices", [])]
+        control_entries = list(block.get("control_entries", []))
+        if len(active_ids) != len(control_entries):
+            warnings.append(f"generic_block_length_mismatch:{encoding_name}:{comp_base}")
+            continue
+
+        family_applied = False
+        decoded_families.add(encoding_name)
+        for active_idx, comp_ix in enumerate(active_ids):
+            entry = entry_by_component.get(int(comp_ix))
+            if entry is None:
+                warnings.append(f"generic_component_metadata_missing:{encoding_name}:{comp_ix}")
+                continue
+
+            target_ix = int(entry.get("target_index", -1))
+            scalar_values = list(entry.get("scalar_values", []))
+            control = control_entries[active_idx]
+
+            if encoding_name == "nal_entropyfloat3":
+                matrix_translation_source = str(entry.get("matrix_translation_source", "unknown"))
+                matrix_translation_op = str(entry.get("matrix_translation_op", "unknown"))
+                if (
+                    not generic_lookup_a_supported
+                    or matrix_translation_source != "pose"
+                    or matrix_translation_op not in ("copy_translation", "copy_transform")
+                ):
+                    _record_named_target(float3_skipped_targets, entry)
+                    continue
+
+                default_value = tuple(float(v) for v in list(entry.get("default_value") or ()))
+                if len(default_value) < 3 or len(scalar_values) < 1:
+                    warnings.append(f"generic_component_oob:{encoding_name}:{comp_ix}")
+                    continue
+                scalar_scale = float(scalar_values[0]) * block_shared_scale
+
+                x_data_off = int(control.get("x_data_off", 0))
+                y_data_off = int(control.get("y_data_off", 0))
+                z_data_off = int(control.get("z_data_off", 0))
+                x_data = blob[x_data_off : x_data_off + int(control.get("len_x", 0))]
+                y_data = blob[y_data_off : y_data_off + int(control.get("len_y", 0))]
+                z_data = blob[z_data_off : z_data_off + int(control.get("len_z", 0))]
+                try:
+                    xs = _decode_generic_entropy_scalar_stream(x_data, frame_count, scalar_scale)
+                    ys = _decode_generic_entropy_scalar_stream(y_data, frame_count, scalar_scale)
+                    zs = _decode_generic_entropy_scalar_stream(z_data, frame_count, scalar_scale)
+                except Exception as exc:
+                    warnings.append(f"generic_float3_decode_failed:{comp_ix}:{exc}")
+                    continue
+
+                track = bone_tracks.setdefault(int(target_ix), {"rotation": {}, "location": {}})
+                loc_track = track.setdefault("location", {})
+                for frame_no in range(frame_count):
+                    loc_track[int(frame_no) + 1] = (
+                        float(default_value[0] + xs[frame_no]),
+                        float(default_value[1] + ys[frame_no]),
+                        float(default_value[2] + zs[frame_no]),
+                    )
+                family_applied = True
+                float3_applied = True
+                _record_named_target(float3_applied_targets, entry)
+                continue
+
+            default_quat = tuple(float(v) for v in list(entry.get("default_value") or ()))
+            if len(default_quat) < 4 or len(scalar_values) < 1:
+                warnings.append(f"generic_component_oob:{encoding_name}:{comp_ix}")
+                continue
+            scalar_scale = float(scalar_values[0]) * block_shared_scale
+            quat_data_off = int(control.get("data_off", 0))
+            quat_data = blob[quat_data_off : quat_data_off + int(control.get("len", 0))]
+            try:
+                decoded_quats = _decode_generic_packed16_quat_stream(quat_data, frame_count, scalar_scale)
+            except Exception as exc:
+                warnings.append(f"generic_quat_decode_failed:{comp_ix}:{exc}")
+                continue
+
+            if len(decoded_quats) != frame_count:
+                warnings.append(f"generic_quat_length_mismatch:{comp_ix}:{len(decoded_quats)}")
+                continue
+
+            track = bone_tracks.setdefault(int(target_ix), {"rotation": {}, "location": {}})
+            rot_track = track.setdefault("rotation", {})
+            default_quat = _quat_normalize_wxyz(default_quat)
+            for frame_no, decoded_quat in enumerate(decoded_quats, start=1):
+                final_quat = _quat_mul_wxyz(decoded_quat, default_quat)
+                rot_track[int(frame_no)] = _engine_to_blender_quat_wxyz(final_quat)
+            family_applied = True
+
+        if family_applied:
+            applied_families.add(encoding_name)
+
+    helper_cursor = int(anim.get("generic_body_control_end_off", 0))
+
+    po_families = sorted(
+        _generic_playback_families(skel_data, ("nal_entropypositionorientation",)),
+        key=lambda family: int(family.get("component_index_base", 0)),
+    )
+    for family in po_families:
+        active_entries = _generic_active_entries(family, active_components)
+        if not active_entries:
+            continue
+
+        block_shared_scale = 1.0
+        if shared_scale_ix < len(shared_scales):
+            block_shared_scale = float(shared_scales[shared_scale_ix])
+        shared_scale_ix += 1
+
+        comp_base = int(family.get("component_index_base", -1))
+        try:
+            helper_cursor, control_entries = _walk_generic_position_orientation_control(blob, helper_cursor, len(active_entries))
+        except Exception as exc:
+            warnings.append(f"generic_po_walk_failed:{comp_base}:{exc}")
+            continue
+
+        if len(control_entries) != len(active_entries):
+            warnings.append(f"generic_po_length_mismatch:{comp_base}:{len(control_entries)}")
+            continue
+
+        family_applied = False
+        decoded_families.add("nal_entropypositionorientation")
+        for entry, control in zip(active_entries, control_entries):
+            comp_ix = int(entry.get("component_index", -1))
+            scalar_values = list(entry.get("scalar_values", []))
+            if len(scalar_values) < 2:
+                warnings.append(f"generic_po_component_oob:{comp_ix}")
+                continue
+
+            pos_scale = float(scalar_values[0]) * block_shared_scale
+            quat_scale = float(scalar_values[1]) * block_shared_scale
+            if _apply_po_track(entry, control, pos_scale, quat_scale, "generic_po"):
+                family_applied = True
+                _record_helper_target(entry)
+
+        if family_applied:
+            applied_families.add("nal_entropypositionorientation")
+            base_bone_po_applied = True
+
+    trajectory_families = sorted(
+        _generic_playback_families(skel_data, ("nal_entropytrajectorypositionorientation",)),
+        key=lambda family: int(family.get("component_index_base", 0)),
+    )
+    for family in trajectory_families:
+        active_entries = _generic_active_entries(family, active_components)
+        if not active_entries:
+            continue
+
+        comp_base = int(family.get("component_index_base", -1))
+        try:
+            helper_cursor, control_entries = _walk_generic_position_orientation_control(blob, helper_cursor, len(active_entries))
+        except Exception as exc:
+            warnings.append(f"generic_trajectory_walk_failed:{comp_base}:{exc}")
+            continue
+
+        if len(control_entries) != len(active_entries):
+            warnings.append(f"generic_trajectory_length_mismatch:{comp_base}:{len(control_entries)}")
+            continue
+
+        family_applied = False
+        decoded_families.add("nal_entropytrajectorypositionorientation")
+        for entry, control in zip(active_entries, control_entries):
+            if _apply_po_track(
+                entry,
+                control,
+                GENERIC_TRAJECTORY_FIXED_SCALE,
+                GENERIC_TRAJECTORY_FIXED_SCALE,
+                "generic_trajectory",
+            ):
+                family_applied = True
+                _record_helper_target(entry)
+
+        if family_applied:
+            applied_families.add("nal_entropytrajectorypositionorientation")
+            helper_root_applied = True
+
+    float1_families = sorted(
+        _generic_playback_families(skel_data, ("nal_entropyfloat1",)),
+        key=lambda family: int(family.get("component_index_base", 0)),
+    )
+    for family in float1_families:
+        active_entries = _generic_active_entries(family, active_components)
+        if not active_entries:
+            continue
+
+        metadata_only_families.add("nal_entropyfloat1")
+        for entry in active_entries:
+            comp_ix = int(entry.get("component_index", -1))
+            default_value = entry.get("default_value")
+            if default_value is None:
+                warnings.append(f"generic_float1_component_oob:{comp_ix}")
+                continue
+
+            floor_offset_tracks.append({
+                "target_index": int(entry.get("target_index", -1)),
+                "target_name": str(entry.get("target_name", f"Bone_{int(entry.get('target_index', -1))}")),
+                "component_index": comp_ix,
+                "default_value": float(default_value),
+                "min_value": float(default_value),
+                "max_value": float(default_value),
+                "frame_count": int(frame_count),
+                "note": "default_pose_only",
+            })
+            _record_helper_target(entry)
+
+    usmevent_families = sorted(
+        _generic_playback_families(skel_data, ("usmevent",)),
+        key=lambda family: int(family.get("component_index_base", 0)),
+    )
+    for family in usmevent_families:
+        active_entries = _generic_active_entries(family, active_components)
+        if not active_entries:
+            continue
+
+        metadata_only_families.add("usmevent")
+        for entry in active_entries:
+            usmevent_tracks.append({
+                "target_index": int(entry.get("target_index", -1)),
+                "target_name": str(entry.get("target_name", f"Bone_{int(entry.get('target_index', -1))}")),
+                "component_index": int(entry.get("component_index", -1)),
+                "note": "active_component_present_decode_pending",
+            })
+            _record_helper_target(entry)
+
+    if "nal_entropyfloat3" in decoded_families and not float3_applied:
+        metadata_only_families.add("nal_entropyfloat3")
+
+    if float3_applied:
+        if helper_root_applied:
+            partial_note = "generic_body_translation_plus_rotation_plus_helper_root"
+        elif base_bone_po_applied:
+            partial_note = "generic_body_translation_plus_rotation_plus_base_bone_po"
+        else:
+            partial_note = "generic_body_translation_plus_rotation"
+    elif helper_root_applied:
+        partial_note = "generic_body_rotation_plus_helper_root"
+    elif base_bone_po_applied:
+        partial_note = "generic_body_rotation_plus_base_bone_po"
+
+    extras = {
+        "generic_active_families": sorted(generic_active_families),
+        "generic_decoded_families": sorted(decoded_families),
+        "generic_applied_families": sorted(applied_families),
+        "generic_metadata_only_families": sorted(metadata_only_families),
+        "generic_helper_targets": sorted(helper_targets),
+        "generic_lookup_a_supported": bool(generic_lookup_a_supported),
+        "generic_float3_applied_targets": sorted(float3_applied_targets),
+        "generic_float3_skipped_targets": sorted(float3_skipped_targets),
+        "generic_floor_offset_tracks": floor_offset_tracks,
+        "generic_usmevent_tracks": usmevent_tracks,
+    }
+    return bone_tracks, warnings, partial_note, extras
+
 
 class PCANIMCodecError(Exception):
     pass
@@ -47,9 +876,64 @@ def _get_num_tracks(mask):
     return 3 * _get_num_quats(mask) + (6 if _get_has_extras(mask) else 0)
 
 
-def _get_num_tracks_for_comp(comp_ix, mask):
+def _get_arbitrary_quat_bit_count(track_meta=None):
+    if not isinstance(track_meta, dict):
+        return 12
+    try:
+        count = int(track_meta.get("quat_track_count", 12))
+    except Exception:
+        return 12
+    return max(0, count)
+
+
+def _get_arbitrary_total_slot_count(track_meta=None):
+    if not isinstance(track_meta, dict):
+        return 16
+    try:
+        quat_count = int(track_meta.get("quat_track_count", 12))
+    except Exception:
+        quat_count = 12
+    try:
+        vector_count = int(track_meta.get("vector_track_count", max(0, 16 - quat_count)))
+    except Exception:
+        vector_count = max(0, 16 - quat_count)
+    total = max(0, quat_count) + max(0, vector_count)
+    return total if total > 0 else 16
+
+
+def _coerce_mask_words(mask, total_slots):
+    words_needed = max(1, (max(0, int(total_slots)) + 31) // 32)
+    if isinstance(mask, (list, tuple)):
+        words = [int(v) & 0xFFFFFFFF for v in mask[:words_needed]]
+    else:
+        words = [int(mask) & 0xFFFFFFFF]
+    if len(words) < words_needed:
+        words.extend([0] * (words_needed - len(words)))
+    return words
+
+
+def _count_mask_bits(mask, total_slots):
+    words = _coerce_mask_words(mask, total_slots)
+    total_slots = max(0, int(total_slots))
+    count = 0
+    full_words, rem = divmod(total_slots, 32)
+    for word_ix in range(full_words):
+        count += _popcount(words[word_ix])
+    if rem:
+        count += _popcount(words[full_words] & ((1 << rem) - 1))
+    return count
+
+
+def _iter_mask_bits(mask, total_slots):
+    words = _coerce_mask_words(mask, total_slots)
+    for bit in range(max(0, int(total_slots))):
+        if words[bit >> 5] & (1 << (bit & 31)):
+            yield bit
+
+
+def _get_num_tracks_for_comp(comp_ix, mask, track_meta=None):
     if comp_ix == COMP_ARBITRARY_PO:
-        return 3 * _popcount(mask & 0xFFFF)
+        return 3 * _count_mask_bits(mask, _get_arbitrary_total_slot_count(track_meta))
     if comp_ix == COMP_GENERIC:
         return 0
     if comp_ix == COMP_FAKEROOT_STD:
@@ -93,9 +977,9 @@ def _get_num_tracks_for_comp(comp_ix, mask):
     return _get_num_tracks(mask)
 
 
-def _get_num_bytes_for_comp(comp_ix, mask):
+def _get_num_bytes_for_comp(comp_ix, mask, track_meta=None):
     if comp_ix == COMP_ARBITRARY_PO:
-        return _to_bytes(_get_num_tracks_for_comp(comp_ix, mask))
+        return _to_bytes(_get_num_tracks_for_comp(comp_ix, mask, track_meta), 0x3C)
     if comp_ix == COMP_GENERIC:
         return 0
     if comp_ix == COMP_FAKEROOT_STD:
@@ -1180,18 +2064,18 @@ def _integrate_for_frame_linear(tracks, codec_ixs, mask, frame, dec, time_scale,
             t.whole += d
 
 
-def _integrate_for_frame_arbitrary(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
+def _integrate_for_frame_arbitrary(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim, track_meta=None):
     scaled_quant = DEQUANT_SCALE * float(time_scale)
     _dequant_tracks(tracks, codec_ixs, dec, frame, scaled_quant, is_scene_anim)
 
     if frame == 0:
         return
 
+    quat_bit_count = _get_arbitrary_quat_bit_count(track_meta)
+    total_slot_count = _get_arbitrary_total_slot_count(track_meta)
     track_ix = 0
-    for bit in range(16):
-        if (mask & (1 << bit)) == 0:
-            continue
-        if bit < 12:
+    for bit in _iter_mask_bits(mask, total_slot_count):
+        if bit < quat_bit_count:
             if frame == 1:
                 _reconstruct_quat_initial(tracks, track_ix)
             else:
@@ -1206,7 +2090,6 @@ def _integrate_for_frame_arbitrary(tracks, codec_ixs, mask, frame, dec, time_sca
                     t.delta = d
                     t.whole += d
         track_ix += 3
-
 
 def _integrate_for_frame_noop(tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim):
     del tracks, codec_ixs, mask, frame, dec, time_scale, is_scene_anim
@@ -1292,7 +2175,7 @@ _INTEGRATOR_BY_COMPONENT = {
 }
 
 
-def _decode_component_frames(comp_ix, codec_ixs, encoded_data, mask, frame_count, current_time, is_scene_anim):
+def _decode_component_frames(comp_ix, codec_ixs, encoded_data, mask, frame_count, current_time, is_scene_anim, track_meta=None):
     if frame_count <= 0:
         return []
 
@@ -1308,6 +2191,9 @@ def _decode_component_frames(comp_ix, codec_ixs, encoded_data, mask, frame_count
 
     out = []
     for frame in range(frame_count):
-        integrator(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim)
+        if int(comp_ix) == COMP_ARBITRARY_PO:
+            integrator(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim, track_meta=track_meta)
+        else:
+            integrator(tracks, codec_ixs, mask, frame, dec, current_time, is_scene_anim)
         out.append([float(t.whole) for t in tracks])
     return out
